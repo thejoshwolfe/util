@@ -1,0 +1,32 @@
+#!/usr/bin/env python
+
+"""
+sorts files in place.
+
+line endings are canonicaclized to unix line endings,
+and the last non-blank line is guaranteed to end with a newline.
+"""
+
+import sys, os
+import optparse
+
+def main(args):
+    for path in args:
+        with open(path, "rU") as f:
+            contents = f.read()
+        lines = contents.split("\n")
+        if lines[-1] == "":
+            # we'll always have an eol at eof
+            del lines[-1]
+        lines.sort()
+        lines.append("")
+        with open(path, "w") as f:
+            f.write("\n".join(lines))
+
+if __name__ == "__main__":
+    parser = optparse.OptionParser(usage="usage: %prog [file...]", description=__doc__)
+    (options, args) = parser.parse_args()
+    if args == []:
+        parser.error("must have at least one arg")
+    sys.exit(main(args))
+

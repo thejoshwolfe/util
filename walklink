@@ -1,0 +1,48 @@
+#!/usr/bin/env python
+
+import os, sys
+import optparse
+
+__version__ = "0.2"
+
+def main(path):
+    path = os.path.abspath(path)
+    print(path)
+    paths = set([path])
+    while True:
+        path = resolve_once(path)
+        if path == None:
+            break
+        print(path)
+        if path in paths:
+            sys.exit("ERROR: Infinite recursion detected")
+        paths.add(path)
+
+def resolve_once(path):
+    path_parts = path.split("/")
+    for cursor in reversed(range(1+len(path_parts))):
+        base = "/".join(path_parts[:cursor])
+        tail = "/".join(path_parts[cursor:])
+        if os.path.islink(base):
+            path = resolve_link(base)
+            if tail != "":
+                path = os.path.join(path, tail)
+            return path
+    return None
+
+
+def resolve_link(path):
+    target = os.readlink(path)
+    if target.startswith("/"):
+        return target
+    return os.path.join(os.path.dirname(path), target)
+
+if __name__ == "__main__":
+    parser = optparse.OptionParser(version=__version__)
+    (options, args) = parser.parse_args()
+    if len(args) == 0:
+        parser.error("Missing argument")
+    if len(args) != 1:
+        parser.error("Too many arguments")
+    main(args[0])
+

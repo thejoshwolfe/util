@@ -1,0 +1,168 @@
+#!/usr/bin/env python
+
+# TODO: rewrite this in native Zig for performance.
+
+"""
+prints and overwrites lines of stdout from running a program such that only 1
+line is visible at a time. lines of stderr are left visible.
+
+usage:
+    progress cmd ...
+
+examples:
+    progress rm -rfv /
+    progress make
+    progress tar cavf archive.tar.gz
+"""
+
+import os, sys
+import subprocess
+import select
+
+__version__ = "0.4"
+
+if os.name == "nt":
+    stderr_strategy = subprocess.STDOUT
+else:
+    stderr_strategy = subprocess.PIPE
+
+def getTerminalSize():
+    """
+    returns (lines:int, cols:int)
+    """
+    import os, struct
+    def ioctl_GWINSZ(fd):
+        import fcntl, termios
+        return struct.unpack("hh", fcntl.ioctl(fd, termios.TIOCGWINSZ, "1234"))
+    # try stdin, stdout, stderr
+    for fd in (0, 1, 2):
+        try:
+            return ioctl_GWINSZ(fd)
+        except:
+            pass
+    # try os.ctermid()
+    try:
+        fd = os.open(os.ctermid(), os.O_RDONLY)
+        try:
+            return ioctl_GWINSZ(fd)
+        finally:
+            os.close(fd)
+    except:
+        pass
+    # try `stty size`
+    try:
+        return tuple(int(x) for x in os.popen("stty size", "r").read().split())
+    except:
+        pass
+    # try environment variables
+    try:
+        return tuple(int(os.getenv(var)) for var in ("LINES", "COLUMNS"))
+    except:
+        pass
+    # i give up. return default.
+    return (25, 80)
+
+def move_cursor_up(line_count):
+    if 0 < line_count:
+        # print at least 1 character on the next line so mintty will move the cursor down.
+        sys.stdout.write(" \b")
+        # move cursor up
+        sys.stdout.write("\x1b[%iA" % line_count)
+
+def printablify(text):
+    def printablify_char(c):
+        if c == "\t":
+            return " " * 8
+        if c == "\n":
+            return c
+        n = ord(c)
+        if n < 0x20:
+            return "^" + chr(n + 0x40)
+        if n == 0x7f:
+            return "^?"
+        if 0x80 <= n:
+            return "."
+        return c
+    text = text.replace("\r\n", "\n")
+    return "".join(printablify_char(c) for c in text)
+
+def get_lines(stdin, stderr):
+    if stderr == None:
+        for line in stdin.readline():
+            yield (printablify(line.rstrip()), True)
+        return
+    stdin_collector = [""]
+    stderr_collector = [""]
+    while True:
+        (ready, _, _) = select.select([stdin, stderr], [], [])
+        def collect_if_ready(stream, stream_collector):
+            if stream in ready:
+                text = printablify(os.read(stream.fileno(), 0x1000))
+                if text == "":
+                    return False
+                stream_collector[0] += text
+                return True
+            return False
+        if not (collect_if_ready(stdin, stdin_collector) or collect_if_ready(stderr, stderr_collector)):
+            return
+        def extract_line(stream_collector):
+            text = stream_collector[0]
+            end_index = text.rfind("\n")
+            if end_index == -1:
+                return None
+            start_index = text[:end_index].rfind("\n")
+            line = text[start_index+1:end_index].rstrip()
+            stream_collector[0] = text[end_index+1:]
+            return line
+        line = extract_line(stdin_collector)
+        if line != None:
+            yield (line, True)
+        else:
+            line = extract_line(stderr_collector)
+            if line != None:
+                yield (line, False)
+
+def main(args):
+    if args == ["--version"]:
+        sys.exit(__version__)
+    cols = getTerminalSize()[1]
+    if len(args) == 0:
+        stdin = sys.stdin
+        stderr = None
+    else:
+        process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=stderr_strategy)
+        stdin = process.stdout
+        stderr = process.stderr # sometimes None
+    stdout = sys.stdout
+
+    how_far_to_move_the_cursor_up = 0
+    for (text, clear_afterward) in get_lines(stdin, stderr):
+        # restore cursor and print real content
+        move_cursor_up(how_far_to_move_the_cursor_up)
+        stdout.write(text)
+
+        # clear the rest of the space we had written to
+        text_length = len(text)
+        last_line_remainder = cols - text_length % cols
+        multi_line_count = text_length // cols + 1
+
+        # erase remainder of the last line
+        stdout.write(" " * last_line_remainder)
+        # erase any lines below
+        extra_lines_to_blank = max(0, how_far_to_move_the_cursor_up - multi_line_count)
+        for _ in range(extra_lines_to_blank):
+            stdout.write(" " * cols)
+        move_cursor_up(extra_lines_to_blank)
+        if clear_afterward:
+            how_far_to_move_the_cursor_up = multi_line_count
+        else:
+            how_far_to_move_the_cursor_up = 0
+
+        stdout.flush()
+
+if __name__ == "__main__":
+    try:
+        main(sys.argv[1:])
+    except KeyboardInterrupt:
+        pass
+

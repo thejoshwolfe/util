@@ -1,0 +1,243 @@
+#!/usr/bin/env python
+
+__doc__ = """
+extracts archives according to file extension.
+output goes into current directory, but always as a single item,
+which may be a container directory if the archive is a "tar bomb".
+"""
+__version__ = "2.0"
+
+import os, sys
+import subprocess
+import optparse
+import tempfile
+import shutil
+
+tar_names = (".tar", )
+tar_names_z = (".tar.gz", ".tgz")
+tar_names_j = (".tar.bz", ".tar.bz2")
+tar_names_J = (".tar.xz", )
+tar_names_J = (".tar.xz", )
+rar_names = (".rar", )
+zip_names = (".zip", ".jar")
+p7zip_names = (".7z",)
+all_exts = tar_names + tar_names_z + tar_names_j + tar_names_J + rar_names + zip_names + p7zip_names
+
+usage_content = """\
+%(prog)s [options] file...
+
+%(__doc__)s
+
+supported file extensions and option interpretation:
+    tar: %(tar)s
+        --verbose -> -v
+    unrar: %(rar)s
+        --verbose -> show stdout
+    unzip: %(zip)s
+        --verbose -> not -q
+    p7zip: %(p7zip)s
+        --verbose -> show stdout
+""" % {
+    "__doc__": __doc__.strip(),
+    "prog": os.path.basename(__file__),
+    "tar": " ".join(tar_names + tar_names_z + tar_names_j + tar_names_J),
+    "rar": " ".join(rar_names),
+    "zip": " ".join(zip_names),
+    "p7zip": " ".join(p7zip_names),
+}
+usage_message = "Usage: " + usage_content
+
+
+def should_use_container(lines):
+    top_level_items = set()
+    for line in lines:
+        top_level_item = line.split("/")[0]
+        top_level_items.add(top_level_item)
+    return 1 < len(top_level_items)
+
+def get_output(cmd):
+    try:
+        process = subprocess.Popen(cmd, stdout=subprocess.PIPE)
+    except OSError:
+        sys.exit("the program \"" + cmd[0] + "\" is not installed")
+    (stdout, _) = process.communicate()
+    if process.returncode != 0:
+        sys.exit(process.returncode)
+    return stdout
+
+def maybe_mkdir(options, dir_path):
+    if not options.just_echo and not os.path.isdir(dir_path):
+        os.mkdir(dir_path)
+
+def tar(filepath, output_dir, options, algo_char):
+    # get list of contents
+    stdout = get_output(["tar", "-tf", filepath])
+    use_container = should_use_container(line for line in stdout.split("\n") if line != "")
+    # determine extract command
+    extra_options = []
+    if options.verbose:
+        extra_options.append("-v")
+    if use_container:
+        extra_options.append("-C")
+        extra_options.append(output_dir)
+        maybe_mkdir(options, output_dir)
+    return (["tar"] + extra_options + ["-x" + algo_char + "f", filepath], {})
+
+def unrar(filepath, output_dir, options):
+    # get list of contents
+    stdout = get_output(["unrar", "v", filepath])
+    lines = stdout.split("\n")
+    if len(lines) < 8 or not lines[7].startswith("-----"):
+        sys.exit("ERROR: output from `unrar v` is malformed")
+    file_list = lines[8:-4:2]
+    use_container = should_use_container(file_list)
+    # determine extract command
+    kwargs = {}
+    if not options.verbose:
+        kwargs["stdout"] = subprocess.PIPE
+    if use_container:
+        maybe_mkdir(options, output_dir)
+        filepath = os.path.abspath(filepath)
+        kwargs["cwd"] = output_dir
+    return (["unrar", "x", "-o+", filepath], kwargs)
+
+
+def unzip(filepath, output_dir, options):
+    # get lits of contents
+    stdout = get_output(["unzip", "-qql", filepath])
+    use_container = should_use_container(line.strip().split("   ")[1] for line in stdout.split("\n") if line.strip() != "")
+    # determine extract command
+    extra_pre_options = []
+    extra_post_options = []
+    if not options.verbose:
+        extra_pre_options.append("-q")
+    if use_container:
+        extra_post_options.append("-d")
+        extra_post_options.append(output_dir)
+    return (["unzip"] + extra_pre_options + [filepath] + extra_post_options, {})
+
+def p7zip(filepath, output_dir, options):
+    if options.echo or options.just_echo:
+        print("# effectively do soemthing like this:")
+        print("dir=$(mktemp -d)")
+        print("cp {} $(dir)/".format(repr(filepath)))
+        quiet_string = " > /dev/null"
+        if options.verbose:
+            quiet_string = ""
+        print("(cd $(dir); p7zip -d {}{})".format(repr(os.path.basename(filepath)), quiet_string))
+        print("# if there's a single top-level item after extracting:")
+        print("mv $(dir)/* .")
+        print("# otherwise:")
+        print("mkdir {}".format(repr(output_dir)))
+        print("mv $(dir)/* {}".format(repr(output_dir)))
+        print("# and finally:")
+        print("rmdir $(dir)")
+        if options.just_echo:
+            return
+
+    # first test if p7zip is available
+    with open(os.devnull, "w") as dev_null:
+        process = subprocess.Popen(["p7zip", "--help"], stdout=dev_null, stderr=subprocess.STDOUT)
+        process.communicate()
+
+    temp_dir = tempfile.mkdtemp()
+    try:
+        # copy the source file into the temp dir
+        temp_src = os.path.join(temp_dir, os.path.basename(filepath))
+        shutil.copyfile(filepath, temp_src)
+
+        # extract the archive
+        cmd = ["p7zip", "-d", os.path.basename(filepath)]
+        kwargs = {}
+        kwargs["cwd"] = temp_dir
+        if options.verbose:
+            print(" ".join(cmd))
+        else:
+            kwargs["stdout"] = subprocess.PIPE
+        process = subprocess.Popen(cmd, **kwargs)
+        process.communicate()
+        if process.returncode != 0:
+            return process.returncode
+
+        # measure how many files there are
+        extracted_names = os.listdir(temp_dir)
+        if os.path.basename(filepath) in extracted_names:
+            os.stderr.write("WARNING: expected p7zip to delete tmp archive: {}\n".format(temp_src))
+            # then what do we do? idk. just do something.
+        if len(extracted_names) == 1:
+            # move single output item to cwd
+            os.rename(os.path.join(temp_dir, extracted_names[0]), extracted_names[0])
+        else:
+            os.mkdir(output_dir)
+            try:
+                for name in extracted_names:
+                    if options.verbose:
+                        print("mv {} {}".format(os.path.join(temp_dir, name), os.path.join(output_dir, name)))
+                    shutil.move(os.path.join(temp_dir, name), os.path.join(output_dir, name))
+            except:
+                # attempt to delete the output directory
+                try:
+                    shutil.rmtree(output_dir, ignore_errors=True)
+                except:
+                    pass # best effort
+                raise
+    finally:
+        # attempt to delete the tmp directory
+        try:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        except:
+            pass # best effort
+
+
+def split_ext(filepath, extensions):
+    for ext in extensions:
+        if filepath.endswith(ext):
+            return (filepath[:-len(ext)], ext)
+    return (None, None)
+def unfoo(filepath, options):
+    (base_name, ext) = split_ext(filepath, all_exts)
+    if base_name == None:
+        sys.exit("fatal: unrecognized extension: " + filepath)
+    output_dir = os.path.basename(base_name)
+    if ext in tar_names:
+        (cmd, kwargs) = tar(filepath, output_dir, options, "")
+    elif ext in tar_names_z:
+        (cmd, kwargs) = tar(filepath, output_dir, options, "z")
+    elif ext in tar_names_j:
+        (cmd, kwargs) = tar(filepath, output_dir, options, "j")
+    elif ext in tar_names_J:
+        (cmd, kwargs) = tar(filepath, output_dir, options, "J")
+    elif ext in rar_names:
+        (cmd, kwargs) = unrar(filepath, output_dir, options)
+    elif ext in zip_names:
+        (cmd, kwargs) = unzip(filepath, output_dir, options)
+    elif ext in p7zip_names:
+        return p7zip(filepath, output_dir, options)
+    else:
+        raise TODO
+    if options.just_echo:
+        print(" ".join(cmd))
+        return
+    if options.echo:
+        print(" ".join(cmd))
+    process = subprocess.Popen(cmd, **kwargs)
+    process.communicate()
+    return process.returncode
+
+if __name__ == "__main__":
+    parser = optparse.OptionParser(usage=usage_content, version=__version__)
+    parser.add_option("-v", "--verbose", action="store_true")
+    parser.add_option("-e", "--echo", action="store_true", help=\
+        "print the underlying command before executing it."
+    )
+    parser.add_option("-j", "--just-echo", action="store_true", help=\
+        "print the underlying command instead of executing it."
+    )
+    (options, args) = parser.parse_args()
+    if args == []:
+        sys.exit(usage_message)
+    for filepath in args:
+        exit_code = unfoo(filepath, options)
+        if exit_code:
+            sys.exit(exit_code)
+
