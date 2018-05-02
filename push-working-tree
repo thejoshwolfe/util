@@ -1,0 +1,138 @@
+#!/usr/bin/env python
+
+"""
+pushes your working changes from a local clone of a
+git repo to a remote clone of the repo.
+each file mentioned in a local `git status` gets
+pushed or remotely deleted to match the local state.
+
+This requires ssh and rsync access to the remote host.
+The local HEAD must match the remote HEAD, i.e. both
+repos should be on the same branch/commit before you run this script.
+
+WARNING: Obliterates any remote working tree changes
+without confirmation. Make sure you commit/stash anything
+important remotely before running this script.
+"""
+
+import os, sys, subprocess
+
+def cli():
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("host", help="the host to push to recognizable by ssh and rsync.")
+    parser.add_argument("remote_repo_root", nargs="?", help=
+        "path to the root of the remote git repo. " +
+        "defaults to the same path as the local repo relative to each $HOME. " +
+        "a relative path is relative to the remote $HOME. " +
+        "if the local repo is not relative to $HOME, this option is required."
+    )
+    args = parser.parse_args()
+
+    abs_local_repo_dir = find_git_repo()
+    remote_repo_root = args.remote_repo_root
+    if remote_repo_root == None:
+        remote_repo_root = relpath_down(abs_local_repo_dir, os.environ["HOME"])
+        if remote_repo_root == None:
+            parser.error(
+                "remote_repo_root is required when local git dir is outside home: " +
+                abs_local_repo_dir + " is outside " + os.environ["HOME"]
+            )
+
+    main(abs_local_repo_dir, args.host, remote_repo_root)
+
+def main(abs_local_repo_dir, hostname, remote_repo_root):
+    # do both git status calls at once
+    remote_git_status_getter = remote_git_status_delayed(hostname, remote_repo_root, get_head_sha1())
+    local_git_status_getter = git_status_delayed()
+    # collect the results once they're available
+    all_changed_files = set()
+    all_changed_files.update(parse_files_from_git_status(local_git_status_getter()))
+    all_changed_files.update(parse_files_from_git_status(remote_git_status_getter()))
+
+    rsync_cmd = ["rsync", "-vaz", "--delete-missing-args", "--from0", "--files-from", "-", abs_local_repo_dir, hostname + ":" + remote_repo_root]
+    rsync_process = subprocess.Popen(rsync_cmd, stdin=subprocess.PIPE)
+    rsync_process.communicate("\x00".join(all_changed_files))
+    check_returncode(rsync_process, rsync_cmd)
+
+remote_program_template = """
+import sys, subprocess
+local_sha1 = %(sha1)s
+remote_sha1 = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=%(cwd)s).rstrip()
+if local_sha1 != remote_sha1:
+    sys.exit("ERROR: remote repo HEAD {} not in sync with local HEAD {}".format(remote_sha1, local_sha1))
+subprocess.check_call(["git", "status", "-z"], cwd=%(cwd)s)
+"""
+def remote_git_status_delayed(hostname, remote_repo_root, sha1):
+    cmd = [
+        "ssh", hostname,
+        # we can't just throw arbitrary parameters here,
+        # because all of this is interpreted by a shell.
+        "python", "-",
+    ]
+    # pipe the variable input through stdin.
+    stdin = remote_program_template % {
+        "sha1": repr(sha1),
+        "cwd": repr(remote_repo_root),
+    }
+    process = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    def getter():
+        (stdout, _) = process.communicate(stdin)
+        check_returncode(process, cmd)
+        return stdout
+    return getter
+
+def find_git_repo():
+    return git_rev_parse("--show-toplevel")
+def get_head_sha1():
+    return git_rev_parse("HEAD")
+def git_rev_parse(arg):
+    # there's no option for null-terminated output from this command.
+    stdout = subprocess.check_output(["git", "rev-parse", arg])
+    return stdout.rstrip()
+
+def git_status_delayed():
+    cmd = ["git", "status", "-z"]
+    process = subprocess.Popen(cmd, stdout=subprocess.PIPE)
+    def getter():
+        (stdout, _) = process.communicate()
+        check_returncode(process, cmd)
+        return stdout
+    return getter
+def parse_files_from_git_status(stdout):
+    i = iter(stdout.split("\x00")[:-1])
+    for chunk in i:
+        assert chunk[2] == " "
+        status, file_name = chunk[:2], chunk[3:]
+        assert len(file_name) > 0
+        yield file_name
+        if status[0] == "R" or status[1] == "R":
+            # rename statuses produce another file
+            yield i.next()
+
+def relpath_down(path, start):
+    """like os.path.relpath, but returns None if the path would go ../up"""
+    path_segments = split_path_all_the_way(path)
+    start_segments = split_path_all_the_way(start)
+    if path_segments[:len(start_segments)] != start_segments:
+        return None
+    return os.path.join(*path_segments[len(start_segments):])
+def split_path_all_the_way(path):
+    """os.path.split repeatedly"""
+    result = []
+    while True:
+        new_path, segment = os.path.split(path)
+        if new_path == path:
+            break
+        path = new_path
+        result.append(segment)
+    result.append(path)
+    result.reverse()
+    return result
+
+def check_returncode(process, cmd):
+    if process.returncode != 0:
+        raise subprocess.CalledProcessError(process.returncode, cmd)
+
+if __name__ == "__main__":
+    cli()
