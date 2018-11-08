@@ -1,0 +1,3 @@
+[submodule "deps/wolfebin"]
+	path = deps/wolfebin
+	url = https://github.com/thejoshwolfe/wolfebin
