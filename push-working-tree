@@ -50,7 +50,15 @@ def main(abs_local_repo_dir, hostname, remote_repo_root):
     all_changed_files.update(parse_files_from_git_status(local_git_status_getter()))
     all_changed_files.update(parse_files_from_git_status(remote_git_status_getter()))
 
-    rsync_cmd = ["rsync", "-vaz", "--delete-missing-args", "--from0", "--files-from", "-", abs_local_repo_dir, hostname + ":" + remote_repo_root]
+    rsync_options = [
+        # verbose, archive, compress
+        "-vaz",
+        # if i tell you to delete, then delete it.
+        "--delete-missing-args",
+        # if i tell you to delete a directory, then delete it.
+        "--force",
+    ]
+    rsync_cmd = ["rsync"] + rsync_options + ["--from0", "--files-from", "-", abs_local_repo_dir, hostname + ":" + remote_repo_root]
     rsync_process = subprocess.Popen(rsync_cmd, stdin=subprocess.PIPE)
     rsync_process.communicate("\x00".join(all_changed_files))
     check_returncode(rsync_process, rsync_cmd)
