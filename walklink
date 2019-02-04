@@ -1,41 +1,145 @@
 #!/usr/bin/env python
 
-import os, sys
+import os, stat
+import sys
+import re
 import optparse
 
 __version__ = "0.2"
 
+reset_color = "\x1b[0m"
+def format_link(t):
+    return "\x1b[01;36m" + t + reset_color
+def format_value(t):
+    return "\x1b[01;35m" + t + reset_color
+def format_notfound(t):
+    return "\x1b[01;31m" + t + reset_color
+def format_dir(t):
+    return "\x1b[01;34m" + t + reset_color
+def format_file(t):
+    return "\x1b[01;32m" + t + reset_color
+def format_special(t):
+    return "\x1b[01;33m" + t + reset_color
+def format_collapse(t):
+    return "\x1b[01;7m" + t + reset_color
+
 def main(path):
-    path = os.path.abspath(path)
-    print(path)
+    path = canonicalize_path(path)
     paths = set([path])
     while True:
-        path = resolve_once(path)
+        path = iterate(path)
         if path == None:
             break
-        print(path)
+        path = canonicalize_path(path)
         if path in paths:
             sys.exit("ERROR: Infinite recursion detected")
         paths.add(path)
 
-def resolve_once(path):
-    path_parts = path.split("/")
-    for cursor in reversed(range(1+len(path_parts))):
-        base = "/".join(path_parts[:cursor])
-        tail = "/".join(path_parts[cursor:])
-        if os.path.islink(base):
-            path = resolve_link(base)
+def get_file_type(path):
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return "notfound"
+    if stat.S_ISLNK(st.st_mode):
+        return "symlink"
+    if stat.S_ISDIR(st.st_mode):
+        return "dir"
+    if stat.S_ISREG(st.st_mode):
+        return "file"
+    return "other"
+
+def iterate(path):
+    formatted_dir = "/"
+    for (dir, name, tail) in decompose_path(path):
+        if name == "..":
+            # no links yet, so this is safe to collapse
+            if dir == "/":
+                collapse_part = name
+            else:
+                collapse_part = dir.split("/")[-1] + "/" + name
+                dir = "/".join(dir.split("/")[:-1]) or "/"
+                formatted_dir = "/".join(formatted_dir.split("/")[:-1]) or "/"
+            print(" .. " + path_join_strip_trailing_slash(formatted_dir, format_collapse(collapse_part), tail))
+            return path_join_strip_trailing_slash(dir, tail)
+
+        this_dir = os.path.join(dir, name)
+        t = get_file_type(this_dir)
+        if t == "dir":
+            formatted_dir = os.path.join(formatted_dir, format_dir(name))
+            continue
+        if t == "symlink":
+            print("*   " + path_join_strip_trailing_slash(formatted_dir, format_link(name), tail))
+            link_value = os.readlink(this_dir)
+            if os.path.isabs(link_value):
+                print(" -> " + path_join_strip_trailing_slash(format_value(link_value), tail))
+                return path_join_strip_trailing_slash(link_value, tail)
+            else:
+                print(" -> " + path_join_strip_trailing_slash(formatted_dir, format_value(link_value), tail))
+                return path_join_strip_trailing_slash(dir, link_value, tail)
+        if t == "notfound":
+            print("!   " + path_join_strip_trailing_slash(formatted_dir, format_notfound(name), tail))
+            return None
+        if t == "file":
             if tail != "":
-                path = os.path.join(path, tail)
-            return path
+                print("!   " + path_join_strip_trailing_slash(formatted_dir, format_file(name)) + format_notfound("/" + tail))
+            else:
+                print("*   " + path_join_strip_trailing_slash(formatted_dir, format_file(name)))
+            return None
+        if t == "other":
+            # /dev/null, for example
+            if tail != "":
+                print("!   " + path_join_strip_trailing_slash(formatted_dir, format_special(name)) + format_notfound("/" + tail))
+            else:
+                print("*   " + path_join_strip_trailing_slash(formatted_dir, format_special(name)))
+            return None
+        raise ASDF
+    # dirs all the way down
+    print("*   " + formatted_dir)
     return None
 
+def canonicalize_path(path):
+    if path.startswith("//") and sys.platform == "cygwin":
+        root = "//"
+        path = re.sub("^/+", "", path)
+    elif path.startswith("/"):
+        root = "/"
+        path = path[1:]
+    else:
+        # relative path
+        root = os.getcwd()
 
-def resolve_link(path):
-    target = os.readlink(path)
-    if target.startswith("/"):
-        return target
-    return os.path.join(os.path.dirname(path), target)
+    # have to preserve this, because file.txt/. is different than file.txt
+    trailing_dot = ""
+    if path.endswith("/."):
+        trailing_dot = "."
+
+    path = "/".join(x for x in path.split("/") if x not in ("", "."))
+    if path.endswith(".."):
+        trailing_dot = ""
+    path = path_join_strip_trailing_slash(root, path, trailing_dot)
+    return path
+
+def decompose_path(path):
+    assert os.path.isabs(path)
+
+    parts = path.split("/")
+    for (i, name) in enumerate(parts):
+        if name == "": continue
+        root = "/".join(parts[:i])
+        if root == "": root = "/"
+        yield (
+            root,
+            name,
+            "/".join(parts[i + 1:]),
+        )
+
+def path_join_strip_trailing_slash(*args):
+    # os.path.join("a", "") => "a/"
+    # but we want no trailing slash.
+    path = os.path.join(*args)
+    if path != "/" and path.endswith("/"):
+        path = path[:-1]
+    return path
 
 if __name__ == "__main__":
     parser = optparse.OptionParser(version=__version__)
