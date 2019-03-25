@@ -1,0 +1,42 @@
+#!/usr/bin/env python3
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-a", "--all", action="store_true", help=
+        "show colors from 0..63 instead of a small range that is probably what you're looking for.")
+    parser.add_argument("code", nargs="*", help=
+        "test applying these codes. e.g. 1 31 44")
+    args = parser.parse_args()
+
+    if args.all and args.code:
+        parser.error("only one of --all and code allowed")
+
+    text = "hello"
+    reset_sequence = "\x1b[m"
+    def print_line(*codes):
+        control_sequence = "\x1b[{}m".format(";".join(str(c) for c in codes))
+        print("{} {}{}{} {}".format(repr(control_sequence), control_sequence, text, reset_sequence, repr(reset_sequence)))
+    if args.code:
+        print_line(*args.code)
+    elif args.all:
+        for i in range(0, 64):
+            print_line(i)
+    else:
+        # tour of interesting things
+
+        print("#### foreground ####")
+        for i in [0, 1, 30, 31, 32, 33, 34, 35, 36]:
+            print_line(i)
+
+        print("\n#### bold+background ####")
+        backgrounds = [41, 42, 43, 44, 45, 46, 47]
+        for i in backgrounds:
+            print_line(1, i)
+
+        print("\n#### red+background ####")
+        for i in backgrounds:
+            print_line(31, i)
+
+if __name__ == "__main__":
+    main()
