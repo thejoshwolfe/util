@@ -25,8 +25,13 @@ def main():
     else:
         # tour of interesting things
 
-        print("#### foreground ####")
-        for i in [0, 1, 30, 31, 32, 33, 34, 35, 36]:
+        print("#### styles ####")
+        for i in [0, 1, 2]:
+            print_line(i)
+
+        print("\n#### foregrounds ####")
+        foregrounds = [30, 31, 32, 33, 34, 35, 36]
+        for i in foregrounds:
             print_line(i)
 
         print("\n#### bold+background ####")
@@ -34,9 +39,9 @@ def main():
         for i in backgrounds:
             print_line(1, i)
 
-        print("\n#### red+background ####")
-        for i in backgrounds:
-            print_line(31, i)
+        print("\n#### faded+foreground ####")
+        for i in foregrounds:
+            print_line(2, i)
 
 if __name__ == "__main__":
     main()
