@@ -1,3 +1,6 @@
 [submodule "deps/wolfebin"]
 	path = deps/wolfebin
 	url = https://github.com/thejoshwolfe/wolfebin
+[submodule "deps/svn-color"]
+	path = deps/svn-color
+	url = git@github.com:thejoshwolfe/svn-color.git
