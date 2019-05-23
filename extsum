@@ -1,80 +1,46 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 __doc__ = "summarizes file extensions in parameters. traverses directories recursively"
-__version__ = "0.1"
+__version__ = "1.0"
 
 import sys, os
+import collections, itertools
 
-def full_path_split(path):
-    """
-    uses os.path.split repeatedly to split the provided path into a sequence of components.
-    """
-    path = os.path.abspath(path)
-    backwards_result = []
-    while True:
-        (parent, name) = os.path.split(path)
-        if path == parent:
-            backwards_result.append(parent)
-            break
-        path = parent
-        backwards_result.append(name)
-    return reversed(backwards_result)
+def main():
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--version", action="version", version=__version__)
+    parser.add_argument("-a", "--alpha", action="store_true", help=
+        "sort alphabetically by file extension instead of by popularity.")
+    parser.add_argument("path", nargs="*")
+    args = parser.parse_args()
 
-def root_set(paths):
-    """
-    Returns the minimal collection parent paths that include all of the provided paths.
-    Return type is iterable to produce strings in no particular order.
-    Relative paths are transformed into absolute paths.
-    Paths are not checked for existence.
-    Paths are treated case sensitively despite the platform.
-    """
-    # handle the easy cases
-    try:
-        if len(paths) <= 1:
-            return paths
-    except TypeError:
-        pass # can't get the len. oh well.
-    result_tree = {}
-    for path in paths:
-        node = result_tree
-        for name in full_path_split(path):
-            try:
-                node = node[name]
-                if len(node) == 0:
-                    # a prior generalization already included this path
-                    break
-            except KeyError:
-                child_node = {}
-                node[name] = child_node
-                node = child_node
-        else:
-            # prior paths were too specific. this is more general (or identical).
-            node.clear()
-    # return paths to all the leafs
-    result_list = []
-    def collect_leafs(node_path, node):
-        if len(node) == 0:
-            result_list.append(node_path)
-        else:
-            for (child_name, child_node) in node.items():
-                child_path = os.path.join(node_path, child_name)
-                collect_leafs(child_path, child_node)
-    for (root_name, root_node) in result_tree.items():
-        collect_leafs(root_name, root_node)
-    return result_list
+    paths = args.path or ["."]
 
-def walk_files(*roots):
+    counts = collections.Counter(
+        get_extension(file)
+        for file in itertools.chain(*(
+            recursive_list(path) for path in paths
+        ))
+    )
+    if args.alpha:
+        # alphabetical by name, which is unique
+        sorted_items = sorted(counts.items())
+    else:
+        # descending numeric, then ascending name
+        sorted_items = sorted(counts.items(), key=lambda pair: (-pair[1], pair[0]))
+    for (ext, count) in sorted_items:
+        print("{}\t{}".format(count, ext))
+
+def recursive_list(root):
     """
-    yields all files in provided files or directories recursively.
-    never yields duplicates (except for case-related subtleties).
+    yields all non-dir paths recursively relative to the root.
+    somehow this is still not included in the standard library.
     """
-    for arg in root_set(roots):
-        if os.path.isfile(arg):
-            yield arg
-        else:
-            for root, dirs, files in os.walk(arg):
-                for file in files:
-                    yield os.path.join(root, file)
+    for dir, dirs, names in os.walk(root):
+        for name in names:
+            full_path = os.path.join(dir, name)
+            yield os.path.relpath(full_path, root)
 
 def get_extension(path):
     """
@@ -82,39 +48,10 @@ def get_extension(path):
     "a/b/c.d.e" -> ".e"
     "a/b/c" -> ""
     """
-    name = os.path.split(path)[1]
-    index = name.rfind(".")
-    if index == -1:
+    try:
+        return "." + os.path.basename(path).rsplit(".", 1)[1]
+    except IndexError:
         return ""
-    return name[index:]
-
-def main(args, options):
-    ext_counts = {}
-    if options.non_recursive:
-        files = args
-    else:
-        files = walk_files(*args)
-    for file in files:
-        ext = get_extension(file)
-        ext_counts[ext] = ext_counts.get(ext, 0) + 1
-    sorting_key = lambda ext_and_count: ext_and_count[0]
-    if options.sort_by_number:
-        sorting_key = lambda ext_and_count: -ext_and_count[1]
-    for (ext, count) in sorted(ext_counts.items(), key=sorting_key):
-        print("%i\t%s" % (count, ext))
-
 
 if __name__ == "__main__":
-    import optparse
-    parser = optparse.OptionParser(
-        usage="usage: %prog [options] [args...]",
-        version=__version__,
-        description=__doc__,
-    )
-    parser.add_option("-N", "--non_recursive", action="store_true", default=False)
-    parser.add_option("-n", "--sort_by_number", action="store_true", default=False)
-    (options, args) = parser.parse_args()
-    if args == []:
-        args = ["."]
-    sys.exit(main(args, options))
-
+    main()
