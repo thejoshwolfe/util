@@ -1,21 +1,29 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 """
 pushes your working changes from a local clone of a
-git repo to a remote clone of the repo.
+git repo to a remote clone of the repo using ssh/rsync.
 each file mentioned in a local `git status` gets
 pushed or remotely deleted to match the local state.
+For the sake of terminology, let's call local clone "source",
+and the remote clone "target".
 
-This requires ssh and rsync access to the remote host.
-The local HEAD must match the remote HEAD, i.e. both
-repos should be on the same branch/commit before you run this script.
+This program is optimized to leave mtimes untouched whenever possible,
+and to present rsync with a minimal set of files to consider.
 
-WARNING: Obliterates any remote working tree changes
-without confirmation. Make sure you commit/stash anything
-important remotely before running this script.
+This program runs `git fetch origin` on the target (via ssh),
+but does not modify any other git metadata in the source or target clones.
+This program assumes that the source remote `origin`
+is the same as the target remote `origin`.
+This program requires python3 on the source and remote machines.
+
+TODO: support submodules.
+
+WARNING: Obliterates any working tree changes in the remote clone without confirmation.
 """
 
 import os, sys, subprocess
+import json
 
 def cli():
     import argparse
@@ -25,11 +33,10 @@ def cli():
         "path to the root of the remote git repo. " +
         "defaults to the same path as the local repo relative to each $HOME. " +
         "a relative path is relative to the remote $HOME. " +
-        "if the local repo is not relative to $HOME, this option is required."
-    )
+        "if the local repo is not relative to $HOME, this option is required.")
     args = parser.parse_args()
 
-    abs_local_repo_dir = find_git_repo()
+    abs_local_repo_dir = git_rev_parse("--show-toplevel")
     remote_repo_root = args.remote_repo_root
     if remote_repo_root == None:
         remote_repo_root = relpath_down(abs_local_repo_dir, os.environ["HOME"])
@@ -42,13 +49,36 @@ def cli():
     main(abs_local_repo_dir, args.host, remote_repo_root)
 
 def main(abs_local_repo_dir, hostname, remote_repo_root):
-    # do both git status calls at once
-    remote_git_status_getter = remote_git_status_delayed(hostname, remote_repo_root, get_head_sha1())
-    local_git_status_getter = git_status_delayed()
-    # collect the results once they're available
-    all_changed_files = set()
-    all_changed_files.update(parse_files_from_git_status(local_git_status_getter()))
-    all_changed_files.update(parse_files_from_git_status(remote_git_status_getter()))
+    target_info = get_target_info(hostname, remote_repo_root)
+
+    for diff_to in target_info["diffs_to"]:
+        try:
+            git_diff_output = git("diff", "--name-only", "-z", diff_to["sha1"], stderr=subprocess.DEVNULL)
+        except subprocess.CalledProcessError:
+            # we don't know about that sha1
+            continue
+        else:
+            # found it.
+            all_changed_files = set()
+            all_changed_files.update(git_diff_output.split("\x00")[:-1])
+            all_changed_files.update(diff_to["files"])
+            break
+    else:
+        lines = ["couldn't find any git commits in common between source and target git repos."]
+        # Sanity check the urls.
+        origin_url = git("config", "--get", "remote.origin.url").rstrip()
+        if origin_url != target_info["origin_url"]:
+            # you probably specified the wrong targe trepo path.
+            lines.extend([
+                "the origin urls are different:",
+                "  source: " + origin_url,
+                "  target: " + target_info["origin_url"],
+            ])
+        else:
+            # this is possible if you've manually fetched and updated the target
+            # beyond the origin/master commit the source is aware of.
+            lines.append("try doing a `git fetch`?")
+        sys.exit("\n".join("ERROR: " + line for line in lines))
 
     rsync_options = [
         # verbose, archive, compress
@@ -60,63 +90,74 @@ def main(abs_local_repo_dir, hostname, remote_repo_root):
     ]
     rsync_cmd = ["rsync"] + rsync_options + ["--from0", "--files-from", "-", abs_local_repo_dir, hostname + ":" + remote_repo_root]
     rsync_process = subprocess.Popen(rsync_cmd, stdin=subprocess.PIPE)
-    rsync_process.communicate("\x00".join(all_changed_files))
+    rsync_process.communicate("\x00".join(all_changed_files).encode("utf8"))
     check_returncode(rsync_process, rsync_cmd)
 
-remote_program_template = """
-import sys, subprocess
-local_sha1 = %(sha1)s
-remote_sha1 = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=%(cwd)s).rstrip()
-if local_sha1 != remote_sha1:
-    sys.exit("ERROR: remote repo HEAD {} not in sync with local HEAD {}".format(remote_sha1, local_sha1))
-subprocess.check_call(["git", "status", "-z"], cwd=%(cwd)s)
+remote_program_prolog_template = """
+cwd = %(cwd)s
 """
-def remote_git_status_delayed(hostname, remote_repo_root, sha1):
+remote_program_body = r"""
+import sys, json, subprocess
+
+def git(*args):
+    return subprocess.check_output(["git"] + list(args), cwd=cwd).decode("utf8")
+
+git("fetch", "origin")
+
+# The merge-base is the most recent commit that's part of the master branch.
+merge_base = git("merge-base", "origin/master", "HEAD").rstrip()
+
+# List all the revisions on this dev branch including the commit in common with master branch
+commit_list = git("log", merge_base + "..HEAD", "--format=%H", "-z").split("\x00")[:-1] + [merge_base]
+
+json.dump({
+    # Sanity check that we're talking about the same repository.
+    "origin_url": git("config", "--get", "remote.origin.url").rstrip(),
+
+    # The current target sha1 tells us the most about the state,
+    # as long as the source has a record of this sha1.
+    "sha1": git("rev-parse", "--verify", "HEAD").rstrip(),
+
+    # If the source doesn't recognize the target's sha1,
+    # it's usually because the target is operating on a dev branch
+    # that has since been force pushed.
+    # Give file-name diff info from the target's current state
+    # against every commit on this dev branch back to master.
+    "diffs_to": [
+        {"sha1": rev, "files": git("diff", "--name-only", "-z", rev).split("\x00")[:-1]}
+        for rev in commit_list
+    ],
+}, sys.stdout)
+"""
+
+def get_target_info(hostname, remote_repo_root):
     cmd = [
         "ssh", hostname,
         # we can't just throw arbitrary parameters here,
         # because all of this is interpreted by a shell.
-        "python", "-",
+        "python3", "-",
     ]
-    # pipe the variable input through stdin.
-    stdin = remote_program_template % {
-        "sha1": repr(sha1),
+    # inject the variable data directly in the source code bytes,
+    # so that ssh's shell interpretation doesn't mess with it.
+    stdin = remote_program_prolog_template % {
         "cwd": repr(remote_repo_root),
-    }
-    process = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
-    def getter():
-        (stdout, _) = process.communicate(stdin)
-        check_returncode(process, cmd)
-        return stdout
-    return getter
+    } + remote_program_body
 
-def find_git_repo():
-    return git_rev_parse("--show-toplevel")
-def get_head_sha1():
-    return git_rev_parse("HEAD")
+    process = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    (stdout, _) = process.communicate(stdin.encode("utf8"))
+    check_returncode(process, cmd)
+    return json.loads(stdout.decode("utf8"))
+
+def check_returncode(process, cmd):
+    if process.returncode != 0:
+        raise subprocess.CalledProcessError(process.returncode, cmd)
+
 def git_rev_parse(arg):
     # there's no option for null-terminated output from this command.
-    stdout = subprocess.check_output(["git", "rev-parse", arg])
-    return stdout.rstrip()
+    return git("rev-parse", arg).rstrip()
 
-def git_status_delayed():
-    cmd = ["git", "status", "-z"]
-    process = subprocess.Popen(cmd, stdout=subprocess.PIPE)
-    def getter():
-        (stdout, _) = process.communicate()
-        check_returncode(process, cmd)
-        return stdout
-    return getter
-def parse_files_from_git_status(stdout):
-    i = iter(stdout.split("\x00")[:-1])
-    for chunk in i:
-        assert chunk[2] == " "
-        status, file_name = chunk[:2], chunk[3:]
-        assert len(file_name) > 0
-        yield file_name
-        if status[0] == "R" or status[1] == "R":
-            # rename statuses produce another file
-            yield i.next()
+def git(*args, **kwargs):
+    return subprocess.check_output(["git"] + list(args), **kwargs).decode("utf8")
 
 def relpath_down(path, start):
     """like os.path.relpath, but returns None if the path would go ../up"""
@@ -137,10 +178,6 @@ def split_path_all_the_way(path):
     result.append(path)
     result.reverse()
     return result
-
-def check_returncode(process, cmd):
-    if process.returncode != 0:
-        raise subprocess.CalledProcessError(process.returncode, cmd)
 
 if __name__ == "__main__":
     cli()
