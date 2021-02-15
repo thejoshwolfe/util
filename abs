@@ -1,33 +1,16 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 import sys, os
-import optparse
 
-if os.path.exists("/cygdrive"):
-    # TODO: better cygwin logic
-    pathext = [""] + os.getenv("PATHEXT").lower().split(";")
-    def correct_case(path):
-        segments = path.split("/")
-        for i in range(1, len(segments)):
-            goals = set(segments[i].lower() + ext for ext in pathext)
-            for name in os.listdir("/".join(segments[0:i])+"/"):
-                if name.lower() in goals:
-                    segments[i] = name
-                    break
-            else:
-                raise WTF
-        return "/".join(segments)
-else:
-    correct_case = lambda path: path
+def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("file", nargs="*")
+    args = parser.parse_args()
+    files = args.file or ["."]
 
-def main(args):
-    if args == []:
-        args = ["."]
-    for arg in args:
-        print(correct_case(os.path.abspath(arg)))
+    for file in files:
+        print(os.path.abspath(file))
 
 if __name__ == "__main__":
-    parser = optparse.OptionParser(usage="usage: %prog [options] [args...]")
-    (options, args) = parser.parse_args()
-    sys.exit(main(args))
-
+    main()

@@ -1,11 +1,8 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 import os, stat
 import sys
 import re
-import optparse
-
-__version__ = "0.2"
 
 reset_color = "\x1b[0m"
 def format_link(t):
@@ -23,7 +20,13 @@ def format_special(t):
 def format_collapse(t):
     return "\x1b[01;7m" + t + reset_color
 
-def main(path):
+def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("file")
+    args = parser.parse_args()
+    path = args.file
+
     path = canonicalize_path(path)
     paths = set([path])
     while True:
@@ -142,11 +145,4 @@ def path_join_strip_trailing_slash(*args):
     return path
 
 if __name__ == "__main__":
-    parser = optparse.OptionParser(version=__version__)
-    (options, args) = parser.parse_args()
-    if len(args) == 0:
-        parser.error("Missing argument")
-    if len(args) != 1:
-        parser.error("Too many arguments")
-    main(args[0])
-
+    main()
