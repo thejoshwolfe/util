@@ -1,29 +1,22 @@
 #!/usr/bin/env python3
 
 """
-pushes your working changes from a local clone of a
-git repo to a remote clone of the repo using ssh/rsync.
-each file mentioned in a local `git status` gets
-pushed or remotely deleted to match the local state.
-For the sake of terminology, let's call local clone "source",
-and the remote clone "target".
+Pushes your working changes from a clone of a git repo on this machine
+to a clone of the repo on a target machine using rsync (which uses ssh).
+Files ignored by git are also ignored by this program.
 
 This program is optimized to leave mtimes untouched whenever possible,
 and to present rsync with a minimal set of files to consider.
 
-This program runs `git fetch origin` on the target (via ssh),
-but does not modify any other git metadata in the source or target clones.
-This program assumes that the source remote `origin`
-is the same as the target remote `origin`.
-This program requires python3 on the source and remote machines.
+This program does not modify any git metadata in the source or target clones.
 
-TODO: support submodules.
-
-WARNING: Obliterates any working tree changes in the remote clone without confirmation.
+WARNING: Obliterates any working tree changes in the target clone without confirmation.
 """
 
-import os, sys, subprocess
-import json
+import os, sys
+import subprocess, shlex
+import re
+import itertools
 
 def cli():
     import argparse
@@ -34,7 +27,13 @@ def cli():
         "defaults to the same path as the local repo relative to each $HOME. " +
         "a relative path is relative to the remote $HOME. " +
         "if the local repo is not relative to $HOME, this option is required.")
+    parser.add_argument("--get-index", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
+
+    if args.get_index:
+        # secret mode reserved for this program to call over ssh.
+        local_repo_dir = args.host
+        return do_get_index(local_repo_dir)
 
     abs_local_repo_dir = git_rev_parse("--show-toplevel")
     remote_repo_root = args.remote_repo_root
@@ -49,36 +48,26 @@ def cli():
     main(abs_local_repo_dir, args.host, remote_repo_root)
 
 def main(abs_local_repo_dir, hostname, remote_repo_root):
-    target_info = get_target_info(hostname, remote_repo_root)
+    # do the remote and local processing in parallel.
+    remote_process = start_remote_scanner(hostname, remote_repo_root)
+    local_tree, local_status, local_submodules = scan_local_repo(abs_local_repo_dir)
 
-    for diff_to in target_info["diffs_to"]:
-        try:
-            git_diff_output = git("diff", "--name-only", "-z", diff_to["sha1"], stderr=subprocess.DEVNULL)
-        except subprocess.CalledProcessError:
-            # we don't know about that sha1
+    # join the remote process.
+    (remote_bytes, _) = remote_process.communicate()
+    check_returncode(remote_process)
+    remote_tree, remote_status, remote_submodules = parse_remote_process_output(remote_bytes)
+
+    # find file differences
+    all_changed_files = set(local_status + remote_status)
+    for file_name in set(itertools.chain(local_tree.keys(), remote_tree.keys())):
+        if local_tree.get(file_name, None) == remote_tree.get(file_name, None):
+            # matches
             continue
-        else:
-            # found it.
-            all_changed_files = set()
-            all_changed_files.update(git_diff_output.split("\x00")[:-1])
-            all_changed_files.update(diff_to["files"])
-            break
-    else:
-        lines = ["couldn't find any git commits in common between source and target git repos."]
-        # Sanity check the urls.
-        origin_url = git("config", "--get", "remote.origin.url").rstrip()
-        if origin_url != target_info["origin_url"]:
-            # you probably specified the wrong targe trepo path.
-            lines.extend([
-                "the origin urls are different:",
-                "  source: " + origin_url,
-                "  target: " + target_info["origin_url"],
-            ])
-        else:
-            # this is possible if you've manually fetched and updated the target
-            # beyond the origin/master commit the source is aware of.
-            lines.append("try doing a `git fetch`?")
-        sys.exit("\n".join("ERROR: " + line for line in lines))
+        all_changed_files.add(file_name)
+
+    # submodules themselves are not useful to sync with rsync.
+    for file_name in itertools.chain(local_submodules, remote_submodules):
+        all_changed_files.discard(file_name)
 
     rsync_options = [
         # verbose, archive, compress
@@ -87,77 +76,139 @@ def main(abs_local_repo_dir, hostname, remote_repo_root):
         "--delete-missing-args",
         # if i tell you to delete a directory, then delete it.
         "--force",
+        # how the heck do i get you to delete directories!
+        "--no-implied-dirs",
     ]
     rsync_cmd = ["rsync"] + rsync_options + ["--from0", "--files-from", "-", abs_local_repo_dir, hostname + ":" + remote_repo_root]
     rsync_process = subprocess.Popen(rsync_cmd, stdin=subprocess.PIPE)
-    rsync_process.communicate("\x00".join(all_changed_files).encode("utf8"))
-    check_returncode(rsync_process, rsync_cmd)
+    rsync_process.communicate(b"\x00".join(all_changed_files))
+    check_returncode(rsync_process)
 
-remote_program_prolog_template = """
-cwd = %(cwd)s
-"""
-remote_program_body = r"""
-import sys, json, subprocess
+def do_get_index(repo_dir):
+    """serializes tree, status, submodules to be parsed by parse_remote_process_output"""
+    tree, status, submodules = scan_local_repo(repo_dir)
 
-def git(*args):
-    return subprocess.check_output(["git"] + list(args), cwd=cwd).decode("utf8")
+    for k, v in tree.items():
+        assert len(k) > 0
+        sys.stdout.buffer.write(k)
+        sys.stdout.buffer.write(b"\x00")
+        assert len(v) > 0
+        sys.stdout.buffer.write(v)
+        sys.stdout.buffer.write(b"\x00")
 
-git("fetch", "origin")
+    # separator
+    sys.stdout.buffer.write(b"\x00")
 
-# The merge-base is the most recent commit that's part of the master branch.
-merge_base = git("merge-base", "origin/master", "HEAD").rstrip()
+    for v in status:
+        assert len(v) > 0
+        sys.stdout.buffer.write(v)
+        sys.stdout.buffer.write(b"\x00")
 
-# List all the revisions on this dev branch including the commit in common with master branch
-commit_list = git("log", merge_base + "..HEAD", "--format=%H", "-z").split("\x00")[:-1] + [merge_base]
+    # separator
+    sys.stdout.buffer.write(b"\x00")
 
-json.dump({
-    # Sanity check that we're talking about the same repository.
-    "origin_url": git("config", "--get", "remote.origin.url").rstrip(),
+    for v in submodules:
+        assert len(v) > 0
+        sys.stdout.buffer.write(v)
+        sys.stdout.buffer.write(b"\x00")
 
-    # The current target sha1 tells us the most about the state,
-    # as long as the source has a record of this sha1.
-    "sha1": git("rev-parse", "--verify", "HEAD").rstrip(),
+def parse_remote_process_output(output_bytes):
+    """parses the output of do_get_index"""
+    lines = split_null_terminated_bytes(output_bytes)
+    separator_1 = lines.index(b"")
+    separator_2 = lines.index(b"", separator_1 + 1)
+    tree = {k: v for k, v in zip(*[iter(lines[:separator_1])]*2)}
+    status = lines[separator_1+1:separator_2]
+    submodules = lines[separator_2+1:]
+    return tree, status, submodules
 
-    # If the source doesn't recognize the target's sha1,
-    # it's usually because the target is operating on a dev branch
-    # that has since been force pushed.
-    # Give file-name diff info from the target's current state
-    # against every commit on this dev branch back to master.
-    "diffs_to": [
-        {"sha1": rev, "files": git("diff", "--name-only", "-z", rev).split("\x00")[:-1]}
-        for rev in commit_list
-    ],
-}, sys.stdout)
-"""
+def scan_local_repo(repo_dir):
+    tree, status = scan_local_repo_no_submodules(repo_dir)
+    # find all submodules
+    submodules = list_submodules(repo_dir)
 
-def get_target_info(hostname, remote_repo_root):
+    for submodule in submodules:
+        sub_tree, sub_status = scan_local_repo_no_submodules(os.path.join(repo_dir, submodule.decode("utf8")))
+        # bring in the subdata prepending the submodules path.
+        for k, v in sub_tree.items():
+            tree[os.path.join(submodule, k)] = v
+        for v in sub_status:
+            status.append(os.path.join(submodule, v))
+
+    return tree, status, submodules
+
+def list_submodules(repo_dir):
+    # Of course there's no proper API for simply listing all the submodules,
+    # so we're making something up here.
+    output_bytes = git_bytes(
+        "submodule", "foreach", "--recursive",
+        r"printf '<\0<' && echo -n $displaypath && printf '>\0>'",
+        cwd=repo_dir)
+    return re.findall(b"<\x00<(.*?)>\x00>", output_bytes)
+
+def scan_local_repo_no_submodules(repo_dir):
+    tree = parse_ls_tree_output(split_null_terminated_bytes(git_bytes(*ls_tree_args, cwd=repo_dir)))
+    status = parse_status_output(split_null_terminated_bytes(git_bytes(*status_args, cwd=repo_dir)))
+    return tree, status
+
+ls_tree_args = ["ls-tree", "-r", "--full-tree", "-z", "HEAD"]
+def parse_ls_tree_output(lines):
+    content_dict = {}
+    for line in lines:
+        # <mode> SP <type> SP <object> TAB <file>
+        # e.g: 100644 blob 322deb411efb0bda27a29d08ca9b7fb600f249e3	README.md
+        (mode, type_, sha1, file_name) = re.match(rb"^(\S*) (\S*) (\S*)\t(.*)$", line).groups()
+        if type_ == b"commit":
+            # this is a submodule
+            continue
+        object_id = mode + b" " + type_ + b" " + sha1
+        content_dict[file_name] = object_id
+    return content_dict
+
+status_args = ["status", "-z", "--no-renames", "--untracked-files=all"]
+def parse_status_output(lines):
+    file_names = []
+    for line in lines:
+        # XY PATH
+        # e.g: " M push-working-tree"
+        [file_name] = re.match(rb"^.. (.*)$", line).groups()
+        file_names.append(file_name)
+    return file_names
+
+def split_null_terminated_bytes(output):
+    lines = output.split(b"\x00")
+    assert lines[-1] == b""
+    return lines[:-1]
+
+
+def start_remote_scanner(hostname, remote_repo_root):
+    # run this program on the remote machine.
+    with open(__file__, "rb") as f:
+        script_bytes = f.read()
     cmd = [
         "ssh", hostname,
-        # we can't just throw arbitrary parameters here,
-        # because all of this is interpreted by a shell.
         "python3", "-",
+        "--get-index", shlex.quote(remote_repo_root),
     ]
-    # inject the variable data directly in the source code bytes,
-    # so that ssh's shell interpretation doesn't mess with it.
-    stdin = remote_program_prolog_template % {
-        "cwd": repr(remote_repo_root),
-    } + remote_program_body
 
     process = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
-    (stdout, _) = process.communicate(stdin.encode("utf8"))
-    check_returncode(process, cmd)
-    return json.loads(stdout.decode("utf8"))
+    # this should never block forever,
+    # because python programs don't execute (and produce output) until they're fully parsed.
+    process.stdin.write(script_bytes)
 
-def check_returncode(process, cmd):
+    return process
+
+def check_returncode(process):
     if process.returncode != 0:
-        raise subprocess.CalledProcessError(process.returncode, cmd)
+        raise subprocess.CalledProcessError(process.returncode, process.args)
 
 def git_rev_parse(arg):
     # there's no option for null-terminated output from this command.
     return git("rev-parse", arg).rstrip()
-
 def git(*args, **kwargs):
-    return subprocess.check_output(["git"] + list(args), **kwargs).decode("utf8")
+    return git_bytes(*args, **kwargs).decode("utf8")
+def git_bytes(*args, **kwargs):
+    return subprocess.check_output(["git"] + list(args), **kwargs)
 
 def relpath_down(path, start):
     """like os.path.relpath, but returns None if the path would go ../up"""
