@@ -70,8 +70,9 @@ def main(abs_local_repo_dir, hostname, remote_repo_root):
         all_changed_files.discard(file_name)
 
     rsync_options = [
-        # verbose, archive, compress
-        "-vaz",
+        # verbose, compress, archive (except timestamps),
+        # and use checksums instead of timestamp for lazy updates
+        "-vzrlpgoDc",
         # if i tell you to delete, then delete it.
         "--delete-missing-args",
         # if i tell you to delete a directory, then delete it.
