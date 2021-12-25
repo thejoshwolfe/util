@@ -4,29 +4,35 @@ __doc__ = "like grep, but prints the captured group instead of the whole match."
 
 import sys, re
 
-def read_file(path):
-    with open(path) as file_handle:
-        return file_handle.read()
-
-def main(pattern_str, args):
+def main(pattern_str, args, one_line_at_a_time):
     pattern = re.compile(pattern_str, re.MULTILINE)
     if len(args) == 0:
         args = ["-"]
-    result = []
+
     for file_path in args:
         if file_path == "-":
-            input_content = sys.stdin.read()
+            input_stream = sys.stdin
         else:
-            input_content = read_file(file_path)
-        result.extend(pattern.findall(input_content))
-    sys.stdout.write("\n".join(result))
-    sys.stdout.write("\n")
+            input_stream = open(file_path)
+        if one_line_at_a_time:
+            for line in input_stream:
+                for result in pattern.findall(line):
+                    print(result, flush=True)
+        else:
+            for result in pattern.findall(input_stream.read()):
+                print(result)
 
-if __name__ == "__main__":
+def cli():
     import argparse
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("-u", "--one-line-at-a-time", action="store_true", help=
+        "search a single line at a time from the input. "
+        "this can be useful for getting immedate results when reading from a slow pipe.")
     parser.add_argument("pattern", help="re.compile(pattern, re.MULTILINE)")
     parser.add_argument("file", nargs="*", help="default is -. - is stdin.")
 
     args = parser.parse_args()
-    sys.exit(main(args.pattern, args.file))
+    main(args.pattern, args.file, args.one_line_at_a_time)
+
+if __name__ == "__main__":
+    cli()
