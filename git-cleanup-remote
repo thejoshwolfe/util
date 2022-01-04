@@ -50,17 +50,26 @@ def main():
     parser.add_argument("remote", nargs="?", default="origin", help=
         "default is %(default)s")
     parser.add_argument("-v", "--verbose", action="store_true", default=False)
+    parser.add_argument("--dry-run", action="store_true", default=False, help=
+        "don't push any changes, but show what command would be run")
+
     parser.add_argument("--archive-before", help=
         "enable analysis for archiving old dev branches. "
         "format must be YYYY-MM-DD. "
         "analysis uses the committer date of the tip commit.")
-    parser.add_argument("--do-delete", action="store_true", default=False, help=
-        "this is required to actually push the 'delete' cleanups.")
     parser.add_argument("--do-archive", action="store_true", default=False, help=
         "this is required to actually push the 'archive' cleanups. "
         "this option requires --archive-before.")
-    parser.add_argument("--dry-run", action="store_true", default=False, help=
-        "don't push any changes, but show what command would be run")
+
+    parser.add_argument("--do-delete", action="store_true", default=False, help=
+        "equivalent to --do-delete-closed --do-delete-merged --do-delete-archived.")
+    parser.add_argument("--do-delete-closed", action="store_true", default=False, help=
+        "this is required to actually push the cleanups to delete branches for closed PRs.")
+    parser.add_argument("--do-delete-merged", action="store_true", default=False, help=
+        "this is required to actually push the cleanups to delete merged branches.")
+    parser.add_argument("--do-delete-archived", action="store_true", default=False, help=
+        "this is required to actually push the cleanups to delete already-archived branches.")
+
     args = parser.parse_args()
 
     # args
@@ -70,6 +79,11 @@ def main():
     if archive_before_str != None:
         if yyyy_mm_dd_pattern.match(archive_before_str) == None:
             parser.error("--archive-before format should be YYYY-MM-DD")
+
+    if args.do_delete:
+        args.do_delete_closed = True
+        args.do_delete_merged = True
+        args.do_delete_archived = True
 
     # repo root is not configurable
     if not os.path.samefile(".", git_output("rev-parse", "--show-toplevel")):
@@ -219,7 +233,7 @@ def main():
     def summarize_dict(name, d, verbose_value_formatter=lambda x: x):
         if len(d) == 0: return
         if args.verbose:
-            print("\n{}({}):{}".format(name, len(d), "".join(
+            print("\n{} ({}):{}".format(name, len(d), "".join(
                 "\n    - {} -> {}".format(k, verbose_value_formatter(v))
                 for k, v in sorted(d.items())
             )))
@@ -228,7 +242,7 @@ def main():
     def summarize_set(name, s):
         if len(s) == 0: return
         if args.verbose:
-            print("\n{}({}):{}".format(name, len(s), "".join(
+            print("\n{} ({}):{}".format(name, len(s), "".join(
                 "\n    - {}".format(v)
                 for v in sorted(s)
             )))
@@ -237,20 +251,22 @@ def main():
     summarize_dict("froce keep branches", keep_alive_branches)
     summarize_dict("keep branches for open PRs", open_pr_branches, lambda pr_number: "#{}".format(pr_number))
     summarize_dict("keep active dev branches", active_wip_branches, lambda date: "last commit on: " + date)
-    summarize_set("delete already merged branches", delete_merged_branches)
-    summarize_set("delete branches for closed PRs", delete_pr_closed_branches)
-    summarize_set("delete already archived branches", delete_archived_branches)
-    summarize_dict("move stale dev branches to archive", archive_branches, lambda path: "refs/archive/{}".format(path))
+    summarize_set("delete already merged branches (--do-delete-merged)", delete_merged_branches)
+    summarize_set("delete branches for closed PRs (--do-delete-closed)", delete_pr_closed_branches)
+    summarize_set("delete already archived branches (--do-delete-archived)", delete_archived_branches)
+    summarize_dict("move stale dev branches to archive (--do-archive)", archive_branches, lambda path: "refs/archive/{}".format(path))
 
-    if not (args.do_delete or args.do_archive):
-        print("\nnot doing anything without --do-delete and/or --do-archive")
+    if not (args.do_delete_closed or args.do_delete_merged or args.do_delete_archived or args.do_archive):
+        print("\nnot doing anything without --do-*")
         return
 
     operations = []
-    if args.do_delete:
-        operations.extend(":{}".format(branch_name) for branch_name in sorted(
-            delete_merged_branches | delete_pr_closed_branches | delete_archived_branches
-        ))
+    if args.do_delete_merged:
+        operations.extend(":{}".format(branch_name) for branch_name in sorted(delete_merged_branches))
+    if args.do_delete_closed:
+        operations.extend(":{}".format(branch_name) for branch_name in sorted(delete_pr_closed_branches))
+    if args.do_delete_archived:
+        operations.extend(":{}".format(branch_name) for branch_name in sorted(delete_archived_branches))
 
     if args.do_archive:
         for branch_name, archive_path in sorted(archive_branches.items()):
