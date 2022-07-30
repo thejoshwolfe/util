@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+
+# Prints (to stdout) "$@" as a single string with shell quoting around each item as necessary.
+# This is a pure-Bash implementation inspired by Python's shlex.join().
+# - Example: shlex_join a b\ c "d"
+#   Prints:  a 'b c' d
+# - Example: shlex_join "isn't it?"
+#   Prints:  'isn'"'"'t it?'
+# - Example: shlex_join "  a  "
+#   Prints:  '  a  '
+# See also: ./shlex_join.test
+
+delimiter=""
+for arg in "$@"; do
+    # Put a space between items, but not before the first item.
+    echo -n "$delimiter"
+    delimiter=" "
+
+    # Check for special characters.
+    if [[ "$arg" =~ ^[a-zA-Z0-9@%+=:,./-]+$ ]]; then
+        # No need to escape this item.
+        echo -n $arg
+    else
+        # Surround this item with 'single quotes',
+        # and replace all actual single quotes with '"'"'.
+        # For example "isn't it?" would be represented by 'isn'"'"'t it?',
+        # which you can parse this like this:             (isn)(')(t it?).
+        # But then in order to get the 5-char string '"'"' into a bash expression,
+        # we need to turn every ' into "'" and every " into '"',
+        # making the 15-char string "'"'"'"'"'"'"'" @_@.
+
+        # The literal " and ' characters in the below expression are:
+        #        '                           '    <- surround with 'single quotes'.
+        #                 ' > '  "  '  "  '       <- replace ' with '"'"'.
+        echo -n "'${arg//"'"/"'"'"'"'"'"'"'"}'"
+    fi
+done

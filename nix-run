@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+
+# This depends on `shlex_join` being available on the PATH.
+# See: https://github.com/thejoshwolfe/util/blob/master/shelx_join
+# Alternatively, set this variable to the path to the tool (or equivalent implementation):
+shlex_join_PATH=${shlex_join_PATH:-shlex_join}
+
+nix_shell_args=()
+while true; do
+    if [ "$#" == 0 ]; then
+        echo "ERROR: ${BASH_SOURCE[0]##*/}: expected a -- parameter to separate the nix-shell args and the program args." >&2
+        exit 1
+    fi
+    case "$1" in
+        -h | --help)
+            echo "usage: ${BASH_SOURCE[0]##*/} [nix-shell options...] -- [cmd...]"
+            echo "If -h or --help is in the [nix-shell options...], print this help message and exit."
+            exit 1
+            ;;
+        --)
+            shift
+            break
+            ;;
+    esac
+    nix_shell_args["${#nix_shell_args[@]}"]="$1"
+    shift
+done
+
+if [ "$#" == 0 ]; then
+    echo "ERROR: no command to run after -- parameter." >&2
+    exit 1
+fi
+
+shell_script="$("$shlex_join_PATH" "$@")"
+
+exec nix-shell "${nix_shell_args[@]}" --run "$shell_script"

@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+
+# (It is recommended that this file not include the chmod +x bit,
+#  and instead simply be run with bash explicitly.
+#  This makes the test suite never suggested by Tab completion while it's on the PATH.)
+
+shlex_join_PATH=${shlex_join_PATH:-shlex_join}
+
+function fail() {
+    echo -n "FAIL: "
+    sed "${BASH_LINENO[1]}q;d" < "${BASH_SOURCE[0]}"
+    exit 1
+}
+
+function testcase() {
+    # This is the array as bash parses it in this file.
+    original=("$@")
+    # This is the string representation that is supposed to eval to the same array.
+    output=$("$shlex_join_PATH" "${original[@]}")
+
+    #echo "original[${#original[@]}]: ${original[@]}"
+    #echo "output: $output"
+
+    # In order to authentically evaluate the argument,
+    # we invoke a subshell and paste the content right in there (on the "evalled=" line).
+    # We pass in the original array as an argument array so the comparison can be done in the subshell.
+    bash -c '
+        original=("$@")
+        #echo "original[${#original[@]}]: ${original[@]}"
+        evalled=('"$output"')
+        #echo "evalled[${#evalled[@]}]: ${evalled[@]}"
+
+        if [ ${#original} != ${#evalled} ]; then
+            exit 1
+        fi
+
+        len=${#original}
+        for (( i=0; i<${len}; i++ )); do
+            if [ "${original[$i]}" != "${evalled[$i]}" ]; then
+                exit 1
+            fi
+        done
+    ' _dummy_arg0_ "${original[@]}" || fail
+}
+
+# Examples from the docs
+testcase a b\ c "d"
+testcase "isn't it?"
+testcase "  a  "
+
+# Strange characters.
+testcase '`~!@#$%^&*()-=_+[]\{}|;";'"'"',./<>? '
+testcase $' \n \r \t '
+
+echo "all tests passed"
