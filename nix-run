@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 
 # This depends on `shlex_join` being available on the PATH.
-# See: https://github.com/thejoshwolfe/util/blob/master/shelx_join
+# See: https://github.com/thejoshwolfe/util/blob/master/shlex_join
+#  Or: https://github.com/thejoshwolfe/util/blob/97290c9a12ead7a89924f5702afeeba026d9d10a/shlex_join
 # Alternatively, set this variable to the path to the tool (or equivalent implementation):
 shlex_join_PATH=${shlex_join_PATH:-shlex_join}
 
