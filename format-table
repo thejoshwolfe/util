@@ -2,7 +2,8 @@
 
 __doc__ = """\
 Reads tab-delimited lines from stdin and then prints them all space-separated instead.
-Once the whole table has been read, the proper width of each column is determined as the max width + 1 space.
+Once the whole table has been read, the proper width of each column is determined as the max width + margin spaces (see --margin).
+Lines are stripped of whitespace on the right.
 This measures the width of a string in unicode points, not actual display width,
 so this doesn't work reliably outside the US ASCII character set.
 """
@@ -13,10 +14,14 @@ from itertools import zip_longest
 def main():
     import argparse
     parser =  argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--margin", type=int, default=1, help=
+        "the number of spaces between columns. default is %(default)s.")
     args = parser.parse_args()
+
     table = list(line.rstrip().split("\t") for line in sys.stdin)
     cols = [max(len(cell or "") for cell in column) for column in zip_longest(*table)]
-    print("\n".join(" ".join(cell.ljust(cols[i]) for i, cell in enumerate(row)).rstrip() for row in table))
+    margin = " " * args.margin
+    print("\n".join(margin.join(cell.ljust(cols[i]) for i, cell in enumerate(row)).rstrip() for row in table))
 
 if __name__ == "__main__":
     main()
