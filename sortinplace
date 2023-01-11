@@ -11,6 +11,8 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("file", nargs="+")
+    parser.add_argument("-u", "--unique", action="store_true", help=
+        "Eliminate duplicates.")
     args = parser.parse_args()
 
     for path in args.file:
@@ -19,6 +21,8 @@ def main():
         if len(lines) > 0 and not lines[-1].endswith("\n"):
             # can't handle missing an EOL at the end of the file
             lines[-1] += "\n"
+        if args.unique:
+            lines = list(set(lines))
         lines.sort()
         with open(path, "w") as f:
             f.write("".join(lines))
