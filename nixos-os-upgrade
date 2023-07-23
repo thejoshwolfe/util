@@ -1,0 +1,129 @@
+#!/usr/bin/env python3
+
+import os, sys
+import subprocess, shlex
+import re
+import urllib.request
+import datetime
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("command", choices=["check", "do-the-upgrade"])
+    parser.add_argument("-v", "--verbose", action="store_true")
+    args = parser.parse_args()
+
+    if args.verbose:
+        global verbose
+        verbose = True
+
+    if args.command == "check":
+        do_check()
+    elif args.command == "do-the-upgrade":
+        do_the_upgrade()
+    else: assert False
+
+def do_the_upgrade():
+    if os.geteuid() != 0:
+        sys.exit("ERROR: run this as root")
+    newer_versions = get_newer_versions()
+    if len(newer_versions) == 0:
+        sys.exit("ERROR: no newer version")
+    if len(newer_versions) > 1:
+        print("WARNING: only upgrading to the next newer version: {}, not all the way to: {}".format(
+            newer_versions[0], newer_versions[-1]), file=sys.stderr, flush=True)
+    new_version = newer_versions[0]
+
+    print("===========================")
+    print("upgrading to version:", new_version)
+    print("===========================")
+    verbose_check_call([
+        "nix-channel",
+        "--add", "https://channels.nixos.org/nixos-{}".format(new_version),
+        "nixos",
+    ])
+    verbose_check_call(["nixos-rebuild", "switch", "--upgrade"])
+
+def do_check():
+    newer_versions = get_newer_versions()
+
+    if len(newer_versions) == 0:
+        verbose_print("Up to date")
+        return
+    elif len(newer_versions) == 1:
+        print("=======================================")
+        print("Newer NixOS OS version available:", newer_versions[0])
+        print("=======================================")
+    else:
+        print("===========================================")
+        print("Multiple newer NixOS OS versions available:")
+        for version in newer_versions:
+            print(" * {}".format(version))
+        print("===========================================")
+
+def get_newer_versions():
+    current_version = re.match(r'(\d+\.\d+)\.', subprocess.check_output(["nixos-version"]).decode("utf8")).group(1)
+    verbose_print("current version:", current_version)
+    assert is_version_exists(current_version)
+    versions_to_check = get_versions_after(current_version)
+    verbose_print("versions to check: {} ... {}".format(versions_to_check[0], versions_to_check[-1]))
+
+    newer_versions = []
+    for version in versions_to_check:
+        verbose_print("checking version {}: ".format(version), end="", flush=True)
+        exists = is_version_exists(version)
+        verbose_print(["nope", "there's one"][exists])
+        if exists:
+            newer_versions.append(version)
+
+    if len(versions_to_check) >= 10 and len(newer_versions) == 0:
+        raise Exception("This script is probably broken. We expect there to be a newer version in 10 months, and we didn't find one.")
+    return newer_versions
+
+def get_versions_after(start_version):
+    def increment(year, month):
+        if month == 12:
+            year += 1
+            month = 1
+        else:
+            month += 1
+        return year, month
+
+    now = datetime.datetime.now()
+    end_year_mod_100 = now.year % 100
+    end_month = now.month
+
+    # Go one month into the future in case there's any off-by-1 errors, like in the car industry.
+    end_year_mod_100, end_month = increment(end_year_mod_100, end_month)
+
+    year_mod_100, month = (int(x) for x in start_version.split("."))
+    # Start after the current version.
+    year_mod_100, month = increment(year_mod_100, month)
+
+    result = []
+    while (year_mod_100, month) <= (end_year_mod_100, end_month):
+        version = "{}.{:02}".format(year_mod_100, month)
+        result.append(version)
+        year_mod_100, month = increment(year_mod_100, month)
+
+    return result
+
+def is_version_exists(version):
+    url = "https://channels.nixos.org/nixos-{}/git-revision".format(version)
+    try:
+        with urllib.request.urlopen(url):
+            return True
+    except urllib.error.HTTPError:
+        return False
+
+verbose = False
+def verbose_print(*args, **kwargs):
+    if not verbose: return
+    print(*args, **kwargs)
+
+def verbose_check_call(cmd):
+    verbose_print("call:", shlex.join(cmd))
+    subprocess.check_call(cmd)
+
+if __name__ == "__main__":
+    main()
