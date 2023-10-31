@@ -5,7 +5,7 @@ Cleans up old branches on GitHub via the `git` command line interface.
 Must be run from a git repo root directory.
 
 This script classifies branches based on several criteria:
-- if the branch is already merged, delete it.
+- if the branch is already merged and pointing to a 30+ day old commit, delete it.
 - if the branch is associated with a closed PR, delete it.
 - if the branch is associated with an open PR, leave it be.
 - if the branch hasn't been touched in a long time, archive it.
@@ -22,9 +22,9 @@ To recover an archived branch, find the name of the branch with:
 `git fetch origin refs/archive/<year>/<name>`, then recreate the branch with
 `git push origin FETCH_HEAD:refs/heads/<name>`.
 
-There is a case for explicitly preserving some branches despite meeting the
-above criteria for deletion/archival. You can configure which branches to keep
-by adding a config file to your repo root with json contents like this:
+There is a case for explicitly preserving some branches despite meeting the above
+criteria for deletion/archival. You can configure which branches to keep by adding
+a `.git-cleanup-remote.config` file to your repo root with json contents like this:
 `{"keep-branches":["branch-name","for-example","integration","production"]}`.
 The remote "HEAD" revision is always preserved,
 which is often "main" or "master".
@@ -37,6 +37,7 @@ This script starts with a `git fetch --prune [remote]` for analysis.
 """
 
 import os, sys, subprocess
+import time
 import re, json
 import collections
 
@@ -127,7 +128,7 @@ def main():
                 keep_branches[branch_name] = "configured in: " + cfg_path
 
     merged_branches = {
-        remove_prefix(ref_name, "refs/remotes/{}/".format(remote))
+        remove_prefix(ref_name, "refs/remotes/{}/".format(remote)): sha1
         for (sha1, ref_name) in [
             line.split("\t")
             for line in git_output_lines("branch", "-r", "--merged", "{}/{}".format(remote, main_branch_name), "--format", "%(objectname)\t%(refname)")
@@ -174,8 +175,11 @@ def main():
         number = remove_suffix(ref_name, "/merge")
         number_to_pr[number]["open"] = True
 
+    a_month_ago_or_so = time.strftime("%Y-%m-%d", time.localtime(time.time() - 30 * 24 * 60 * 60))
+
     keep_alive_branches = {}
     delete_merged_branches = set()
+    recent_merged_branches = {}
     delete_archived_branches = set()
     delete_pr_closed_branches = set()
     unmerged_branches = set()
@@ -188,7 +192,11 @@ def main():
             pass
 
         if branch_name in merged_branches:
-            delete_merged_branches.add(branch_name)
+            date = get_commit_date(merged_branches[branch_name])
+            if date < a_month_ago_or_so:
+                delete_merged_branches.add(branch_name)
+            else:
+                recent_merged_branches[branch_name] = date
             continue
 
         if sha1 in all_achived_sha1s:
@@ -211,10 +219,7 @@ def main():
     if archive_before_str != None:
         for branch_name in unmerged_branches:
             sha1 = all_remote_refs[branch_name]
-            # MMMM-DD-YY
-            date = git_output("log", "-n", "1", "--pretty=tformat:%cs", sha1)
-            assert yyyy_mm_dd_pattern.match(date) != None
-            if date < archive_before_str:
+            if get_commit_date(sha1) < archive_before_str:
                 # archive it
                 year = date[:4]
                 archived_branch_name = "{}/{}".format(year, branch_name)
@@ -251,7 +256,8 @@ def main():
     summarize_dict("froce keep branches", keep_alive_branches)
     summarize_dict("keep branches for open PRs", open_pr_branches, lambda pr_number: "#{}".format(pr_number))
     summarize_dict("keep active dev branches", active_wip_branches, lambda date: "last commit on: " + date)
-    summarize_set("delete already merged branches (--do-delete-merged)", delete_merged_branches)
+    summarize_dict("keep recent empty/merged branches", recent_merged_branches, lambda date: "at least as recent as: " + date)
+    summarize_set("delete older empty/merged branches (--do-delete-merged)", delete_merged_branches)
     summarize_set("delete branches for closed PRs (--do-delete-closed)", delete_pr_closed_branches)
     summarize_set("delete already archived branches (--do-delete-archived)", delete_archived_branches)
     summarize_dict("move stale dev branches to archive (--do-archive)", archive_branches, lambda path: "refs/archive/{}".format(path))
@@ -282,6 +288,11 @@ def main():
     else:
         print("nothing to do!")
 
+def get_commit_date(sha1):
+    """MMMM-DD-YY"""
+    date = git_output("log", "-n", "1", "--pretty=tformat:%cs", sha1)
+    assert yyyy_mm_dd_pattern.match(date) != None
+    return date
 
 def git_output(*args):
     cmd = ["git"]
