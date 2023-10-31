@@ -219,7 +219,8 @@ def main():
     if archive_before_str != None:
         for branch_name in unmerged_branches:
             sha1 = all_remote_refs[branch_name]
-            if get_commit_date(sha1) < archive_before_str:
+            date = get_commit_date(sha1)
+            if date < archive_before_str:
                 # archive it
                 year = date[:4]
                 archived_branch_name = "{}/{}".format(year, branch_name)
