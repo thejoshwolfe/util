@@ -104,8 +104,8 @@ def main():
     # git fetch
     subprocess.run(["git", "fetch", "--prune", remote], check=True)
 
-    # this is usually "master" or "main"
-    main_branch_name = remove_prefix(git_output("rev-parse", "--verify", "--abbrev-ref", "{}/HEAD".format(remote)), "{}/".format(remote))
+    # this is usually "main" or "master"
+    main_branch_name = get_main_branch_name(remote)
 
     keep_branches = {
         "HEAD": "(default)",
@@ -294,6 +294,14 @@ def get_commit_date(sha1):
     date = git_output("log", "-n", "1", "--pretty=tformat:%cs", sha1)
     assert yyyy_mm_dd_pattern.match(date) != None
     return date
+
+def get_main_branch_name(remote):
+    for line in git_output_lines("ls-remote", "--symref", remote, "HEAD"):
+        if not line.startswith("ref: "):
+            # We also get a resolved sha1 for HEAD, which we don't care about.
+            continue
+        return remove_prefix(line.split("\t", 1)[0], "ref: refs/heads/")
+    sys.exit("ERROR: remote did not report a HEAD symref")
 
 def git_output(*args):
     cmd = ["git"]
