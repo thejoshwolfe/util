@@ -3,45 +3,56 @@
 def main():
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("-a", "--all", action="store_true", help=
-        "show colors from 0..63 instead of a small range that is probably what you're looking for.")
+    parser.add_argument("--text", default="hello", help=
+        "The text to put in the given style. Default: %(default)s")
     parser.add_argument("code", nargs="*", help=
         "test applying these codes. e.g. 1 31 44")
     args = parser.parse_args()
 
-    if args.all and args.code:
-        parser.error("only one of --all and code allowed")
-
-    text = "hello"
     reset_sequence = "\x1b[m"
-    def print_line(*codes):
+    def print_line(*codes, text=None, suffix=""):
+        if text == None: text = args.text
         control_sequence = "\x1b[{}m".format(";".join(str(c) for c in codes))
-        print("{} {}{}{} {}".format(repr(control_sequence), control_sequence, text, reset_sequence, repr(reset_sequence)))
+        print("{} {}{}{} {}{}".format(
+            repr(control_sequence), control_sequence,
+            text,
+            reset_sequence, repr(reset_sequence),
+            suffix,
+        ))
     if args.code:
         print_line(*args.code)
-    elif args.all:
-        for i in range(0, 64):
-            print_line(i)
     else:
         # tour of interesting things
 
         print("#### styles ####")
-        for i in [0, 1, 2]:
-            print_line(i)
+        print_line(0, text="default")
+        print_line(1, text="bold")
+        print_line(2, text="faint")
+        print_line(4, text="underline")
+        print_line(7, text="inverted")
+        print_line(8, text="hidden", suffix=" (hidden)")
+        print_line(9, text="strikethrough", suffix=" (non-standard)")
 
-        print("\n#### foregrounds ####")
-        foregrounds = [30, 31, 32, 33, 34, 35, 36]
-        for i in foregrounds:
-            print_line(i)
+        print("\n#### standard colors ####")
+        for i, name in enumerate(["black", "red", "green", "yellow", "blue", "magenta", "cyan", "white"]):
+            print_line(30 + i, text="standard " + name + " foreground")
+            print_line(40 + i, text="standard " + name + " background")
 
-        print("\n#### bold+background ####")
-        backgrounds = [41, 42, 43, 44, 45, 46, 47]
-        for i in backgrounds:
-            print_line(1, i)
+        print("\n#### 256 colors (non-standard format 5) ####")
+        print("# foreground: 38;5;<n>. background: 48;5;<n>")
+        print_line(38, 5, 11, 48, 5, 54, text="example foreground:11, background:54")
+        for row in [range(16)] + list(zip(*[iter(range(16, 256))]*36)):
+            print("".join("\x1b[48;5;{0}m{0:>3}".format(i) for i in row) + reset_sequence)
 
-        print("\n#### faded+foreground ####")
-        for i in foregrounds:
-            print_line(2, i)
+        print("\n#### 1.6M Truecolor (non-standard format 2) ####")
+        print("# foreground: 38;2;<r>;<g>;<b>. background: 48;5;<r>;<g>;<b>")
+        print_line(38, 2, 255, 99, 71, 48, 2, 127, 255, 212, text="example foreground:255;99;71, background:127;255;212")
+        some_values = list(range(0, 256, 17))
+        some_waveform = some_values + [255]*(len(some_values) - 2) + some_values[::-1] + [0]*(len(some_values) - 2)
+        some_waveform2 = some_waveform[len(some_values) - 1:] + some_waveform[:len(some_values) - 1]
+        row = list(zip(some_waveform, some_waveform2))
+        for b in some_values:
+            print("".join("\x1b[48;2;{};{};{}m ".format(r,g,b) for r,g in row) + reset_sequence)
 
 if __name__ == "__main__":
     main()
