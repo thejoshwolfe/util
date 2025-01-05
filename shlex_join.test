@@ -16,7 +16,14 @@ function testcase() {
     # This is the array as bash parses it in this file.
     original=("$@")
     # This is the string representation that is supposed to eval to the same array.
-    output=$("$shlex_join_PATH" "${original[@]}")
+    mapfile -d '' output < <("$shlex_join_PATH" "${original[@]}")
+    # Assert the output doesn't start or end with whitespace.
+    # It's actually inconsequential according to the program's contract (just going to get eval'ed, so whatever),
+    # but we don't want to be wasteful with bytes, and in case any human does look at it,
+    # it should be observably compact.
+    if [[ $output =~ ^[[:space:]] ]] || [[ $output =~ [[:space:]]$ ]]; then
+        fail
+    fi
 
     #echo "original[${#original[@]}]: ${original[@]}"
     #echo "output: $output"
@@ -30,11 +37,11 @@ function testcase() {
         evalled=('"$output"')
         #echo "evalled[${#evalled[@]}]: ${evalled[@]}"
 
-        if [ ${#original} != ${#evalled} ]; then
+        if [ ${#original[@]} != ${#evalled[@]} ]; then
             exit 1
         fi
 
-        len=${#original}
+        len=${#original[@]}
         for (( i=0; i<${len}; i++ )); do
             if [ "${original[$i]}" != "${evalled[$i]}" ]; then
                 exit 1
@@ -51,5 +58,9 @@ testcase "  a  "
 # Strange characters.
 testcase '`~!@#$%^&*()-=_+[]\{}|;";'"'"',./<>? '
 testcase $' \n \r \t '
+
+# Special cases for `echo` but not `printf`
+testcase a -e -n b
+testcase 'a\nb\c'
 
 echo "all tests passed"

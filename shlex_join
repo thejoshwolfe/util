@@ -9,17 +9,20 @@
 # - Example: shlex_join "  a  "
 #   Prints:  '  a  '
 # See also: ./shlex_join.test
+# Should support all special characters and byte sequences only limited by the system:
+# - There is a maximum length of any command's argv imposed by the system.
+# - Null bytes $'\0' can never appear in any command's argv, because of the POSIX ABI.
 
 delimiter=""
 for arg in "$@"; do
     # Put a space between items, but not before the first item.
-    echo -n "$delimiter"
+    printf %s "$delimiter"
     delimiter=" "
 
     # Check for special characters.
     if [[ "$arg" =~ ^[a-zA-Z0-9@%+=:,./-]+$ ]]; then
         # No need to escape this item.
-        echo -n $arg
+        printf %s $arg
     else
         # Surround this item with 'single quotes',
         # and replace all actual single quotes with '"'"'.
@@ -32,6 +35,6 @@ for arg in "$@"; do
         # The literal " and ' characters in the below expression are:
         #        '                           '    <- surround with 'single quotes'.
         #                 ' > '  "  '  "  '       <- replace ' with '"'"'.
-        echo -n "'${arg//"'"/"'"'"'"'"'"'"'"}'"
+        printf %s "'${arg//"'"/"'"'"'"'"'"'"'"}'"
     fi
 done
