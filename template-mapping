@@ -1,0 +1,150 @@
+#!/usr/bin/env python3
+
+import os, sys, subprocess
+import re, json, shlex
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-t", "--template", metavar="config.template", required=True, help=
+        "the template file (in version control probably)")
+    parser.add_argument("-l", "--live", metavar="/etc/some-config", required=True, help=
+        "the live file (in /etc perhaps)")
+    parser.add_argument("-j", "--values", metavar="/etc/some-config.values.json", required=True, help=
+        "the values file (also in /etc perhaps). "
+        "Must be a json file with an object from string to string. "
+        "The keys should include the full exact text of the variable name to replace, including special characters. "
+        'e.g. { "{{name}}": "some-value" }')
+    parser.add_argument("-r", "--reverse", action="store_true", help=
+        "Instead of generating the live file from the template file, generate the template file from the live file. "
+        "The values are read from the json file and reverse replaced. "
+        "This is appropriate when modifications have been made directly to the live file that you want to save in the template file. "
+        "This works best when the template varuable values are sufficiently long and unique within the file. "
+        "This is not possible to do when a template variable has an empty value or when multiple variables have the same value.")
+
+    parser.add_argument("-i", "--insecure", "--interactive", action="store_true", help=
+        "By default, this program does not display the values from the --values file to stdout/stderr "
+        "in case this program is being used to insert secrets into config files. "
+        "This option disables that caution and causes the following changes: "
+        "Shows a diff of the changes to the output file and prompts to continue before overwriting it. "
+        "The warning for being unable to find and replace a value in the input shows the actual value instead of hiding it.")
+    parser.add_argument("-y", "--yes", action="store_true", help=
+        "With -i, answers yes to the prompt to continue.")
+    parser.add_argument("--dry-run", action="store_true", help=
+        "Do not write the output file. "
+        "Useful for detecting errors/warnings, and the diff output from --interactive.")
+
+    args = parser.parse_args()
+
+    # Read values.
+    with open(args.values) as f:
+        values = json.load(f)
+    assert type(values) == dict and all(type(v) == str for v in values.values())
+
+    # Reverse if necessary.
+    input_path = args.template
+    output_path = args.live
+    if args.reverse:
+        input_path, output_path = output_path, input_path
+
+        # Make sure the reverse is safe.
+        assert "" not in values.values(), "cannot --reverse with any empty values"
+        assert len(values) == len(set(values.values())), "cannot --reverse because values are not unique"
+        values = {v: k for k, v in values.items()}
+
+    with open(input_path) as f:
+        input_contents = f.read()
+
+    # Apply changes
+    found_keys = set()
+    def replace_fn(m):
+        key = m.group()
+        found_keys.add(key)
+        return values[key]
+    output_contents = re.sub(r'|'.join(re.escape(k) for k in values.keys()), replace_fn, input_contents)
+
+    # Check for passing the wrong files in.
+    if len(found_keys) == 0 and len(values) != 0:
+        sys.exit("ERROR: no replacements made. none of the values were found!")
+
+    # Check for no changes.
+    try:
+        with open(output_path) as f:
+            old_output_contents = f.read()
+        if output_contents == old_output_contents:
+            # Don't forget to show warnings.
+            show_warnings(values, found_keys, args)
+            print("INFO: already up to date.")
+            return
+    except FileNotFoundError:
+        pass
+
+    # Infer owner/permission settings for output
+    try:
+        output_stat = os.stat(output_path)
+    except FileNotFoundError:
+        # Output is being created from scratch. Use the ownership of the parent dir.
+        output_stat = os.stat(os.path.dirname(os.path.abspath(output_path)))
+        output_mode = None # default mode
+        diff_before_path = "/dev/null"
+    else:
+        output_mode = output_stat.st_mode
+        diff_before_path = output_path
+
+    # Write output to temporary buffer.
+    with open(output_path + ".tmp", "w") as f:
+        os.chown(output_path + ".tmp", output_stat.st_uid, output_stat.st_gid)
+        if output_mode != None:
+            os.chmod(output_path + ".tmp", output_mode)
+        f.write(output_contents)
+    try:
+
+        # Show diff and warnings.
+        if args.insecure:
+            sh_script = (
+                "diff -u3 --color=always {before_path} {after_path}"
+                " | less -RXF"
+            ).format(
+                before_path=shlex.quote(diff_before_path),
+                after_path=shlex.quote(output_path + ".tmp"),
+            )
+            subprocess.run(sh_script, shell=True, check=False)
+        show_warnings(values, found_keys, args)
+
+        # Prompt to continue
+        if args.insecure:
+            prompt = "apply this change? [Yn] "
+            if args.dry_run:
+                prompt += "(dry run) "
+            if args.yes:
+                print(prompt + "--yes")
+            else:
+                try:
+                    if input(prompt).lower()[:1] not in ("y", ""):
+                        sys.exit("aborting!")
+                except KeyboardInterrupt:
+                    print("")
+                    sys.exit("aborting!")
+        if args.dry_run:
+            print("INFO: dry run succeeded. exiting without applying changes.")
+            return
+
+        # Atomic rename into place.
+        os.rename(output_path + ".tmp", output_path)
+
+    finally:
+        try:
+            os.remove(output_path + ".tmp")
+        except FileNotFoundError:
+            pass
+
+def show_warnings(values, found_keys, args):
+    for missing_key in values.keys() - found_keys:
+        if args.insecure:
+            display_value = repr(missing_key)
+        else:
+            display_value = "<value redacted. give --insecure to see it.>"
+        print("WARNING: could not find and replace: " + display_value, file=sys.stderr, flush=True)
+
+if __name__ == "__main__":
+    main()
