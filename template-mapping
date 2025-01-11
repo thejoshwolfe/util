@@ -74,7 +74,9 @@ def main():
         key = m.group()
         found_keys.add(key)
         return values[key]
-    output_contents = re.sub(r'|'.join(re.escape(k) for k in values.keys()), replace_fn, input_contents)
+    # Put longer sequences first in the expression to make sure the longest possible match matches before any prefix substrings.
+    expr = r'|'.join(re.escape(k) for k in sorted(values.keys(), reverse=True, key=lambda s: len(s)))
+    output_contents = re.sub(expr, replace_fn, input_contents)
 
     # Check for passing the wrong files in.
     if len(found_keys) == 0 and len(values) != 0:
