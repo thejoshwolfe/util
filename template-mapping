@@ -52,10 +52,23 @@ def main():
         assert len(values) == len(set(values.values())), "cannot --reverse because values are not unique"
         values = {v: k for k, v in values.items()}
 
+    # Read input.
     with open(input_path) as f:
         input_contents = f.read()
 
-    # Apply changes
+    # Ensure variable names were chosen wisely.
+    if args.reverse:
+        # (Note that the values dict has already been reversed at this point.)
+        ambiguities = re.findall(r'|'.join(re.escape(variable_name) for variable_name in values.values()), input_contents)
+        if len(ambiguities) > 0:
+            # (Note that it's not insecure to show these values, because they're just the names of variables.)
+            sys.exit(
+                "ERROR: the following variable names already appear in the live file, "
+                "and would be ambiguous to use:\n" +
+                "\n".join("  " + json.dumps(variable_name) for variable_name in sorted(set(ambiguities)))
+            )
+
+    # Apply changes.
     found_keys = set()
     def replace_fn(m):
         key = m.group()
