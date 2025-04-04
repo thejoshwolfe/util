@@ -1,19 +1,29 @@
 #!/usr/bin/env python3
 
-import sys, subprocess
+import os, sys, subprocess
 
 def main():
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("-p", "--paste", action="store_true", help=
         "paste to stdout instead of copy from stdin")
+    parser.add_argument("-r", "--raw", action="store_true", help=
+        "when copying from stdin, don't strip the trailing newline when it's the only newline.")
     args = parser.parse_args()
 
     xclip = ["xclip", "-selection", "clipboard"]
     if args.paste:
-        subprocess.check_call(xclip + ["-out"])
+        # Simply delegate.
+        cmd = xclip + ["-out"]
+        os.execvp(cmd[0], cmd)
     else:
-        subprocess.check_call(xclip)
+        # Do a bit of processing of the input.
+        input_bytes = sys.stdin.buffer.read()
+        if input_bytes[-1:] == b"\n" and input_bytes.index(b"\n") == len(input_bytes) - 1 and not args.raw:
+            # strip just a single trainling newline.
+            input_bytes = input_bytes[:-1]
+        # Now delegate.
+        sys.exit(subprocess.run(xclip, input=input_bytes).returncode)
 
 if __name__ == "__main__":
     main()
