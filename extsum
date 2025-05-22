@@ -1,57 +1,92 @@
 #!/usr/bin/env python3
 
-__doc__ = "summarizes file extensions in parameters. traverses directories recursively"
-__version__ = "1.0"
+__doc__ = "summarizes file types/extensions in parameters. traverses directories recursively"
+__version__ = "2.0"
 
-import sys, os
-import collections, itertools
+import sys, os, stat
+import collections
 
 def main():
     import argparse
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", action="version", version=__version__)
     parser.add_argument("-a", "--alpha", action="store_true", help=
-        "sort alphabetically by file extension instead of by popularity.")
-    parser.add_argument("path", nargs="*")
+        "sort alphabetically by file type instead of by popularity.")
+    parser.add_argument("--include-git", action="store_true", help=
+        "By default, any directory called .git is ignored. "
+        "This option includes .git directories.")
+    parser.add_argument("--group", action="store_true", help=
+        "Instead of counts, show all paths grouped by type.")
+    parser.add_argument("path", nargs="*", help=
+        "Paths to search. Default is '.'.")
     args = parser.parse_args()
 
-    paths = args.path or ["."]
-
-    counts = collections.Counter(
-        get_extension(file)
-        for file in itertools.chain(*(
-            recursive_list(path) for path in paths
-        ))
-    )
-    if args.alpha:
-        # alphabetical by name, which is unique
-        sorted_items = sorted(counts.items())
+    if args.group:
+        grouped = collections.defaultdict(list)
     else:
-        # descending numeric, then ascending name
-        sorted_items = sorted(counts.items(), key=lambda pair: (-pair[1], pair[0]))
-    for (ext, count) in sorted_items:
-        print("{}\t{}".format(count, ext))
+        counts = collections.Counter()
 
-def recursive_list(root):
-    """
-    yields all non-dir paths recursively relative to the root.
-    somehow this is still not included in the standard library.
-    """
-    for dir, dirs, names in os.walk(root):
-        for name in names:
-            full_path = os.path.join(dir, name)
-            yield os.path.relpath(full_path, root)
+    for path in args.path or ["."]:
+        for dir, dirs, names in os.walk(path):
+            for name in names:
+                file = os.path.normpath(os.path.join(dir, name))
+                typ = get_type(file)
+                if args.group:
+                    grouped[typ].append(file)
+                else:
+                    counts[typ] += 1
+            if not args.include_git and ".git" in dirs:
+                dirs[:] = [d for d in dirs if d != ".git"]
 
-def get_extension(path):
+    if args.group:
+        if args.alpha:
+            sorted_items = sorted(grouped.items())
+        else:
+            # descending count numeric, then ascending name
+            sorted_items = sorted(grouped.items(), key=lambda pair: (-len(pair[1]), pair[0]))
+        for (typ, files) in sorted_items:
+            print("{}".format(typ))
+            for file in sorted(files):
+                print("\t" + file)
+    else:
+        if args.alpha:
+            # alphabetical by name, which is unique
+            sorted_items = sorted(counts.items())
+        else:
+            # descending count numeric, then ascending name
+            sorted_items = sorted(counts.items(), key=lambda pair: (-pair[1], pair[0]))
+        for (typ, count) in sorted_items:
+            print("{}\t{}".format(count, typ))
+
+def get_type(path):
     """
-    returns file extension of provided path. examples:
+    returns file extension of provided path, or some other description of the file type. examples:
     "a/b/c.d.e" -> ".e"
-    "a/b/c" -> ""
+    "a/b/c" -> "#!/something/maybe"
+    "l" -> "(symlink)"
+    "mystery" -> "(unknown)"
     """
     try:
         return "." + os.path.basename(path).rsplit(".", 1)[1]
     except IndexError:
-        return ""
+        # No file extension.
+        pass
+    try:
+        mode = os.stat(path, follow_symlinks=False).st_mode
+        if stat.S_ISLNK(mode):
+            return "(symlink)"
+    except OSError:
+        return "(unknown)"
+    if mode & 0o111: # +x
+        try:
+            with open(path, "rb") as f:
+                first_line = f.readline().strip()
+            if first_line.startswith(b"#!"):
+                return first_line.decode("utf8")
+        except (OSError, UnicodeDecodeError):
+            # Permission error?
+            pass
+    return "(unknown)"
 
 if __name__ == "__main__":
     main()
