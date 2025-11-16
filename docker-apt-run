@@ -1,0 +1,197 @@
+#!/usr/bin/env python3
+
+__doc__ = """\
+In a docker container: runs apt-get install, mounts the cwd,
+creates a matching uid/gid user, and runs the given command.
+
+This can be useful to develop software projects that have apt-based dev instructions
+without modifying your native system. You can also test that your apt-based dev instructions
+are sufficiently comprehensive in a sterile system container.
+"""
+
+import os, sys, subprocess
+import shlex
+import hashlib
+import itertools
+from functools import lru_cache
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--base-image", default="debian:latest", help=
+        "The docker image to start the build. used in a 'FROM' statement. default: %(default)s")
+    parser.add_argument("-i", "--install", action="append", required=True, help=
+        "apt package(s) to install. can be specified multiple times, and/or can be comma-delimited.")
+    parser.add_argument("--mount", action="append", help=
+        "Mounts the given path(s) into the container. "
+        "Syntax is src[:dst] where src is the path on the host and dst is the path in the container. "
+        "dst defaults to the src (converted to an absolute path). "
+        "Becomes 'docker run -v ...' arguments, which supports individual files as well as directories. "
+        "See also --docker and --no-cwd.")
+    parser.add_argument("--no-cwd", action="store_true", help=
+        "Do not mount the cwd. Requires also specifying --workdir.")
+    parser.add_argument("-w", "--workdir", action="store_true", help=
+        "The cwd for running the cmd in the container. Given to 'docker run -w'. "
+        "Default is the cwd, unless --no-cwd is given.")
+    parser.add_argument("--docker", action="store_true", help=
+        "Mounts the docker daemon socket into the container to allow running docker in docker. "
+        "Also adds the user to the 'docker' group to enable permissions to work correctly. "
+        "It is suggested to '--install docker.io' with this option, but it is not required.")
+    parser.add_argument("cmd", nargs="+", help=
+        "The command to run in the container. Give /bin/bash for an interactive shell. "
+        "You usually want to prefix the command with a lone '--' argument to end this program's CLI parsing.")
+    args = parser.parse_args()
+
+    package_list = list(itertools.chain(*(arg.split(",") for arg in args.install)))
+
+    # Parse determin mounting and workdir
+    mount_pairs = []
+    if args.no_cwd:
+        if not args.workdir: parser.error("--no-cwd requires --workdir")
+        workdir = args.workdir
+    else:
+        cwd = os.getcwd()
+        mount_pairs.append((cwd, cwd))
+        workdir = cwd
+    for mount_str in args.mount or ():
+        # syntax: src[:dst]
+        mount_pair = mount_str.split(":", 1)
+        mount_pair[0] = os.path.abspath(mount_pair[0])
+        if len(mount_pair) == 1:
+            mount_pair.append(mount_pair[0])
+        mount_pairs.append(tuple(mount_pair))
+    if args.docker:
+        docker_sock = get_docker_socket()
+        mount_pairs.append((docker_sock, docker_sock))
+
+    # Build
+    built_image = docker_build(args.base_image, package_list, args.docker)
+
+    # Run
+    docker_run(built_image, mount_pairs, workdir, args.cmd)
+    assert False, "unreachable due to os.execvp()"
+
+def docker_build(base_image, package_list, docker_in_docker):
+    assert package_list, "required=True supposed to enforce this"
+    first_package = package_list[0]
+    package_list = sorted(set(package_list))
+    user_info = get_user_info()
+
+    dockerfile_lines = ["FROM " + base_image]
+    additional_groups_arg = ""
+    if docker_in_docker:
+        # We have to create the docker group before anyone tries to install docker.io,
+        # because the docker gid is not stable. In order for permissions to work for the mounted docker socket,
+        # the gid of the host sock file must match a group that the user belongs to in the container.
+        # The simplest way to do this is to preemptively create the docker group with the gid we want before installing any apt packages.
+        # The docker.io package will respect any existing 'docker' group already present, or else create one.
+        docker_gid = get_docker_gid()
+        dockerfile_lines.append("RUN groupadd --gid {} docker".format(docker_gid))
+        additional_groups_arg = " --groups {}".format(docker_gid)
+
+    # Install packages.
+    dockerfile_lines.append("RUN apt-get update && apt-get install -y " + shlex.join(package_list))
+
+    # Create uid/gid in the container matching the uid/gid of the user running this script on the host.
+    user_setup_scripts = [
+        # Hopefully the 'users' group is the same inside and outside the container.
+        # If the group already exists with the correct gid+name, do nothing.
+        # If the gid we want already exists but has the wrong name, this should fail;
+        # mounting a directory between two systems with conflicting meanings (names) for a uid/gid
+        # is fundamentally unsound, and there's no automated solution for that.
+        ('if ! [ "$(getent group {gid} | cut -d: -f1)" = {group_name} ]; then '
+            'groupadd --gid {gid} {group_name}; '
+        'fi').format(**user_info),
+        'useradd --uid {uid} --gid {gid} --create-home{additional_groups_arg} {user_name}'.format(
+            additional_groups_arg=additional_groups_arg,
+            **user_info,
+        ),
+    ]
+
+    dockerfile_lines.append("RUN " + " && ".join(user_setup_scripts))
+    dockerfile_lines.append("USER {user_name}".format(**user_info))
+
+    dockerfile_contents = "".join(line + "\n" for line in dockerfile_lines).encode("utf8")
+
+    tag = hashlib.sha256(dockerfile_contents).hexdigest()[:8]
+    built_image = "local.invalid/{}:{}".format(first_package, tag)
+
+    # Check if it's already done.
+    if does_docker_image_exist(built_image):
+        return built_image
+
+    # Need to build it.
+    docker_cmd = [
+        "docker", "build", "-",
+        "--tag", built_image,
+    ]
+    docker_process = subprocess.Popen(docker_cmd, stdin=subprocess.PIPE)
+    try:
+        # Pipe the Dockerfile into stdin. Docker build expects a tarfile.
+        import tarfile, io
+        with tarfile.open(fileobj=docker_process.stdin, mode="w|") as tar:
+            dockerfile_info = tarfile.TarInfo("Dockerfile")
+            dockerfile_info.size = len(dockerfile_contents)
+            tar.addfile(dockerfile_info, io.BytesIO(dockerfile_contents))
+    finally:
+        docker_process.stdin.close()
+
+    docker_process.wait()
+    if docker_process.returncode != 0:
+        raise subprocess.CalledProcessError(docker_process.returncode, docker_cmd)
+
+    return built_image
+
+def docker_run(built_image, mount_pairs, workdir, cmd):
+    docker_cmd = ["docker", "run", "--rm", "-it"]
+    for mount_pair in mount_pairs:
+        docker_cmd.extend(["-v", ":".join(mount_pair)])
+    docker_cmd.extend(["-w", workdir])
+    docker_cmd.append(built_image)
+    docker_cmd.extend(cmd)
+
+    # We become docker
+    os.execvp(docker_cmd[0], docker_cmd)
+    assert False, "unreachable"
+
+def does_docker_image_exist(built_image):
+    cmd = ["docker", "image", "ls", "--format=json", built_image]
+    output = subprocess.run(cmd, stdout=subprocess.PIPE, check=True).stdout.decode("utf8")
+    if len(output) > 0:
+        return True
+    return False
+
+@lru_cache()
+def get_docker_socket():
+    # Typically it's just /var/run/docker.sock, but it's configurable, so let's ask.
+    # If we wanted to get fancy, we could accept a CLI for which context to use, defaulting to 'default'.
+    cmd = ["docker", "context", "inspect", "default", "--format", "{{.Endpoints.docker.Host}}"]
+    uri = subprocess.run(cmd, stdout=subprocess.PIPE, check=True).stdout.decode("utf8").rstrip()
+    assert uri.startswith("unix://"), "docker socket not a unix domain socket? " + repr(uri)
+    path = uri[len("unix://"):]
+    assert os.path.isabs(path)
+    return path
+
+@lru_cache()
+def get_docker_gid():
+    """ as a str """
+    import grp
+    docker_gid = grp.getgrnam("docker").gr_gid
+    return str(docker_gid)
+
+@lru_cache()
+def get_user_info():
+    import os, grp, getpass
+    uid = os.getuid()
+    gid = os.getgid()
+    user_info = {
+        "gid": str(gid),
+        "group_name": grp.getgrgid(gid).gr_name,
+        "uid": str(uid),
+        "user_name": getpass.getuser(),
+    }
+    assert all(value == shlex.quote(str(value)) for value in user_info.values()), "user info contains unsafe shell characters"
+    return user_info
+
+if __name__ == "__main__":
+    main()
