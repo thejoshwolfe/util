@@ -30,7 +30,7 @@ def main():
         "See also --docker and --no-cwd.")
     parser.add_argument("--no-cwd", action="store_true", help=
         "Do not mount the cwd. Requires also specifying --workdir.")
-    parser.add_argument("-w", "--workdir", action="store_true", help=
+    parser.add_argument("-w", "--workdir", help=
         "The cwd for running the cmd in the container. Given to 'docker run -w'. "
         "Default is the cwd, unless --no-cwd is given.")
     parser.add_argument("--docker", action="store_true", help=
