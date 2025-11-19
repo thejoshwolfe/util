@@ -31,12 +31,17 @@ def main():
     parser.add_argument("--no-cwd", action="store_true", help=
         "Do not mount the cwd. Requires also specifying --workdir.")
     parser.add_argument("-w", "--workdir", help=
-        "The cwd for running the cmd in the container. Given to 'docker run -w'. "
+        "The cwd for running the cmd in the container. Converted to an absolute path, then given to 'docker run -w'. "
         "Default is the cwd, unless --no-cwd is given.")
+
     parser.add_argument("--docker", action="store_true", help=
         "Mounts the docker daemon socket into the container to allow running docker in docker. "
         "Also adds the user to the 'docker' group to enable permissions to work correctly. "
         "It is suggested to '--install docker.io' with this option, but it is not required.")
+    parser.add_argument("--sudoer", action="store_true", help=
+        "Installs the 'sudo' package and adds the user to the 'sudo' group. "
+        "This enables the user to run root commands with 'sudo' inside the container.")
+
     parser.add_argument("cmd", nargs="+", help=
         "The command to run in the container. Give /bin/bash for an interactive shell. "
         "You usually want to prefix the command with a lone '--' argument to end this program's CLI parsing.")
@@ -48,7 +53,7 @@ def main():
     mount_pairs = []
     if args.no_cwd:
         if not args.workdir: parser.error("--no-cwd requires --workdir")
-        workdir = args.workdir
+        workdir = os.path.abspath(args.workdir)
     else:
         cwd = os.getcwd()
         mount_pairs.append((cwd, cwd))
@@ -64,21 +69,24 @@ def main():
         docker_sock = get_docker_socket()
         mount_pairs.append((docker_sock, docker_sock))
 
+    if args.sudoer:
+        package_list.append("sudo")
+
     # Build
-    built_image = docker_build(args.base_image, package_list, args.docker)
+    built_image = docker_build(args.base_image, package_list, args.docker, args.sudoer)
 
     # Run
     docker_run(built_image, mount_pairs, workdir, args.cmd)
     assert False, "unreachable due to os.execvp()"
 
-def docker_build(base_image, package_list, docker_in_docker):
+def docker_build(base_image, package_list, docker_in_docker, enable_sudoer):
     assert package_list, "required=True supposed to enforce this"
     first_package = package_list[0]
     package_list = sorted(set(package_list))
     user_info = get_user_info()
 
     dockerfile_lines = ["FROM " + base_image]
-    additional_groups_arg = ""
+    additional_groups = []
     if docker_in_docker:
         # We have to create the docker group before anyone tries to install docker.io,
         # because the docker gid is not stable. In order for permissions to work for the mounted docker socket,
@@ -87,7 +95,14 @@ def docker_build(base_image, package_list, docker_in_docker):
         # The docker.io package will respect any existing 'docker' group already present, or else create one.
         docker_gid = get_docker_gid()
         dockerfile_lines.append("RUN groupadd --gid {} docker".format(docker_gid))
-        additional_groups_arg = " --groups {}".format(docker_gid)
+        additional_groups.append(docker_gid)
+
+    if enable_sudoer:
+        additional_groups.append("sudo")
+
+    additional_groups_arg = ""
+    if len(additional_groups) > 0:
+        additional_groups_arg = " --groups {}".format(",".join(additional_groups))
 
     # Install packages.
     dockerfile_lines.append("RUN apt-get update && apt-get install -y " + shlex.join(package_list))
@@ -107,6 +122,9 @@ def docker_build(base_image, package_list, docker_in_docker):
             **user_info,
         ),
     ]
+
+    if enable_sudoer:
+        user_setup_scripts.append("echo '{user_name} ALL=(ALL) NOPASSWD: ALL' >> /etc/sudoers".format(**user_info))
 
     dockerfile_lines.append("RUN " + " && ".join(user_setup_scripts))
     dockerfile_lines.append("USER {user_name}".format(**user_info))
