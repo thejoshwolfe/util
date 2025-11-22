@@ -167,14 +167,30 @@ def docker_build(base_image, package_list, docker_in_docker, enable_sudoer):
     return built_image
 
 def docker_run(built_image, mount_pairs, workdir, cmd, verbose):
-    docker_cmd = ["docker", "run", "--rm", "-it"]
+    docker_cmd = ["docker", "run", "--rm"]
+    have_stdin = sys.stdin != None
+    if have_stdin:
+        docker_cmd.append("-it")
+    else:
+        # Someone has run this with <&- (bash) or stdin=subprocess.DEVNULL (Python), etc.
+        # Docker refuses to function if we give -i in this situation with the following error:
+        # > the input device is not a TTY
+        docker_cmd.append("-t")
     # Always enable host networking. Not sure why we wouldn't want this.
     docker_cmd.append("--network=host")
     for mount_pair in mount_pairs:
         docker_cmd.extend(["-v", ":".join(mount_pair)])
     docker_cmd.extend(["-w", workdir])
     docker_cmd.append(built_image)
-    docker_cmd.extend(cmd)
+
+    if have_stdin:
+        docker_cmd.extend(cmd)
+    else:
+        # We must honor the closed stdin in the container command.
+        # (Kinda seems like this is how `docker run` should have been designed in the first place.)
+        docker_cmd.extend(["bash", "-c",
+            'exec {} <&-'.format(shlex.join(cmd)),
+        ])
 
     if verbose:
         print("exec " + shlex.join(docker_cmd))
