@@ -169,13 +169,16 @@ def docker_build(base_image, package_list, docker_in_docker, enable_sudoer):
 def docker_run(built_image, mount_pairs, workdir, cmd, verbose):
     docker_cmd = ["docker", "run", "--rm"]
     have_stdin = sys.stdin != None
-    if have_stdin:
+    if sys.stdin != None and sys.stdin.isatty():
         docker_cmd.append("-it")
     else:
-        # Someone has run this with <&- (bash) or stdin=subprocess.DEVNULL (Python), etc.
-        # Docker refuses to function if we give -i in this situation with the following error:
-        # > the input device is not a TTY
-        docker_cmd.append("-t")
+        # This situation can leave zombie containers running.
+        # I believe there is no way to get `docker run` to forward Ctrl+C and SIGTERM signals without having a tty stdin.
+        # This seems like a silly limitation to me, because those two concepts are unrelated.
+        # You can still Ctrl+C kill `sleep 100 <&-` with piped stdin or no stdin at all.
+        # This error message from `docker run` makes me sad:
+        #   the input device is not a TTY
+        docker_cmd.append("-i")
     # Always enable host networking. Not sure why we wouldn't want this.
     docker_cmd.append("--network=host")
     for mount_pair in mount_pairs:
