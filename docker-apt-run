@@ -18,6 +18,8 @@ from functools import lru_cache
 def main():
     import argparse
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--verbose", action="store_true", help=
+        "Print the docker run command before executing it.")
     parser.add_argument("--base-image", default="debian:latest", help=
         "The docker image to start the build. used in a 'FROM' statement. default: %(default)s")
     parser.add_argument("-i", "--install", action="append", required=True, help=
@@ -76,7 +78,7 @@ def main():
     built_image = docker_build(args.base_image, package_list, args.docker, args.sudoer)
 
     # Run
-    docker_run(built_image, mount_pairs, workdir, args.cmd)
+    docker_run(built_image, mount_pairs, workdir, args.cmd, args.verbose)
     assert False, "unreachable due to os.execvp()"
 
 def docker_build(base_image, package_list, docker_in_docker, enable_sudoer):
@@ -160,13 +162,16 @@ def docker_build(base_image, package_list, docker_in_docker, enable_sudoer):
 
     return built_image
 
-def docker_run(built_image, mount_pairs, workdir, cmd):
+def docker_run(built_image, mount_pairs, workdir, cmd, verbose):
     docker_cmd = ["docker", "run", "--rm", "-it"]
     for mount_pair in mount_pairs:
         docker_cmd.extend(["-v", ":".join(mount_pair)])
     docker_cmd.extend(["-w", workdir])
     docker_cmd.append(built_image)
     docker_cmd.extend(cmd)
+
+    if verbose:
+        print("exec " + shlex.join(docker_cmd))
 
     # We become docker
     os.execvp(docker_cmd[0], docker_cmd)
