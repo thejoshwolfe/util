@@ -22,7 +22,7 @@ def main():
         "Print the docker run command before executing it.")
     parser.add_argument("--base-image", default="debian:latest", help=
         "The docker image to start the build. used in a 'FROM' statement. default: %(default)s")
-    parser.add_argument("-i", "--install", action="append", required=True, help=
+    parser.add_argument("-i", "--install", action="append", help=
         "apt package(s) to install. can be specified multiple times, and/or can be comma-delimited.")
     parser.add_argument("--mount", action="append", help=
         "Mounts the given path(s) into the container. "
@@ -49,7 +49,11 @@ def main():
         "You usually want to prefix the command with a lone '--' argument to end this program's CLI parsing.")
     args = parser.parse_args()
 
-    package_list = list(itertools.chain(*(arg.split(",") for arg in args.install)))
+    if args.install:
+        package_list = list(itertools.chain(*(arg.split(",") for arg in args.install)))
+    else:
+        # Something that's almost sure to be installed already.
+        package_list = ["coreutils"]
 
     # Parse determin mounting and workdir
     mount_pairs = []
@@ -82,7 +86,7 @@ def main():
     assert False, "unreachable due to os.execvp()"
 
 def docker_build(base_image, package_list, docker_in_docker, enable_sudoer):
-    assert package_list, "required=True supposed to enforce this"
+    assert package_list, "the first package goes into the name. you can change the code if you hit this assertion."
     first_package = package_list[0]
     package_list = sorted(set(package_list))
     user_info = get_user_info()
@@ -164,6 +168,8 @@ def docker_build(base_image, package_list, docker_in_docker, enable_sudoer):
 
 def docker_run(built_image, mount_pairs, workdir, cmd, verbose):
     docker_cmd = ["docker", "run", "--rm", "-it"]
+    # Always enable host networking. Not sure why we wouldn't want this.
+    docker_cmd.append("--network=host")
     for mount_pair in mount_pairs:
         docker_cmd.extend(["-v", ":".join(mount_pair)])
     docker_cmd.extend(["-w", workdir])
